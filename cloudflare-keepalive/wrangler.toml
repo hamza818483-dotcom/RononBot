@@ -1,0 +1,7 @@
+name = "rononbot-keepalive"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+[triggers]
+# প্রতি ১ মিনিটে চলবে — Cloudflare Cron Trigger-এর সর্বোচ্চ ঘন ঘন ব্যবধান
+crons = ["* * * * *"]
