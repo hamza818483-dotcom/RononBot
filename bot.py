@@ -835,11 +835,12 @@ def owner_only(func):
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Exception while handling an update:", exc_info=context.error)
-    try:
-        error_text = f"❌ <b>Bot Error:</b>\n<code>{str(context.error)}</code>\n\nUpdate: {update}"
-        await context.bot.send_message(chat_id=ERROR_NOTIFY_USER, text=error_text[:4096], parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
+    error_text = f"❌ <b>Bot Error:</b>\n<code>{str(context.error)}</code>\n\nUpdate: {update}"
+    for oid in OWNER_IDS:
+        try:
+            await context.bot.send_message(chat_id=oid, text=error_text[:4096], parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
 
 
 # ============================================================
