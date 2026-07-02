@@ -3,9 +3,6 @@ name: Deploy Keep-Alive Worker to Cloudflare
 on:
   push:
     branches: [main]
-    paths:
-      - 'cloudflare-keepalive/worker.js'
-      - 'cloudflare-keepalive/wrangler.toml'
   workflow_dispatch:
 
 jobs:
