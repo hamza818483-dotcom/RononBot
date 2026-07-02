@@ -3,4 +3,4 @@ google-genai
 pdf2image
 Pillow
 aiohttp
-chromium 
+fpdf2
