@@ -2094,7 +2094,7 @@ def main():
 
     ptb_app.add_handler(CallbackQueryHandler(exp_callback, pattern="^exp_"))
     ptb_app.add_handler(CallbackQueryHandler(channel_callback, pattern="^(chdel_|chadd)"))
-    ptb_app.add_handler(CallbackQueryHandler(img_callback, pattern="^img_"))
+    ptb_app.add_handler(CallbackQueryHandler(img_callback, pattern="^(img_|imgmode_|imgch_)"))
     ptb_app.add_handler(CallbackQueryHandler(pdf_callback, pattern="^pdfch_|^pdf_csv"))
     ptb_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     ptb_app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
