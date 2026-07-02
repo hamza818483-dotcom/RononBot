@@ -1,4 +1,6 @@
-python-telegram-bot==21.4
-google-genai==0.3.0
-pdf2image==1.17.0
-Pillow==10.4.0
+python-telegram-bot>=20.0
+google-genai
+pdf2image
+Pillow
+aiohttp
+chromium 
