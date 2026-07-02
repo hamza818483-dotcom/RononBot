@@ -892,6 +892,16 @@ def owner_only(func):
     return wrapper
 
 
+async def notify_owner(context: ContextTypes.DEFAULT_TYPE, text: str):
+    """QuizBot-এর notify_owner-এর মতো — non-fatal কিন্তু গুরুত্বপূর্ণ error (যেমন /pdf-এর
+    কোনো নির্দিষ্ট পেইজ fail করা) owner-দের চুপচাপ log-এ রাখার বদলে সরাসরি জানিয়ে দেয়।"""
+    for oid in OWNER_IDS:
+        try:
+            await context.bot.send_message(chat_id=oid, text=text[:4096], parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+
+
 # ============================================================
 # ERROR HANDLER
 # ============================================================
@@ -1506,6 +1516,7 @@ async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channel_id = None
         topic = DEFAULT_TOPIC
         per_page_count = None
+        thread_id = None  # forum/topic group-এ নির্দিষ্ট থ্রেডে পোস্ট করার জন্য (QuizBot-এর -t সাথে মিলিয়ে)
 
         i = 0
         while i < len(args):
@@ -1519,8 +1530,10 @@ async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 topic = args[i + 1].strip('"\'')
                 i += 2
             elif args[i] == "-t" and i + 1 < len(args):
-                # -t also sets topic (alternative to -m for groups)
-                topic = args[i + 1].strip('"\'')
+                # QuizBot-এ -t মানে numeric forum thread_id, topic name না (আগে ভুলভাবে
+                # topic-alias হিসেবে treat করা হতো, যেটা QuizBot-এর সাথে অসামঞ্জস্যপূর্ণ ছিল)
+                if args[i + 1].isdigit():
+                    thread_id = int(args[i + 1])
                 i += 2
             else:
                 i += 1
@@ -1542,6 +1555,7 @@ async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["pdf_page_range"] = page_range
         context.user_data["pdf_per_page"] = per_page_count
         context.user_data["pdf_user_id"] = update.effective_user.id
+        context.user_data["pdf_thread_id"] = thread_id
 
         if channel_id:
             await process_pdf(update, context, channel_id)
@@ -1637,6 +1651,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
     page_range = context.user_data.get("pdf_page_range")
     per_page = context.user_data.get("pdf_per_page")
     user_id = context.user_data.get("pdf_user_id", update.effective_user.id)
+    thread_id = context.user_data.get("pdf_thread_id")  # forum topic-এ পোস্ট করার জন্য (QuizBot parity)
     chat_id = update.effective_chat.id
     uname = update.effective_user.first_name or "User"
 
@@ -1731,6 +1746,9 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
                 if csv_only:
                     for m in mcqs:
                         opts = m.get("options", ["", "", "", ""])
+                        # AI মাঝেমধ্যে option-এর শুরুতে "A) ", "ক. " ইত্যাদি prefix জুড়ে দেয় —
+                        # CSV-তে সেটা থাকলে duplicate/messy দেখায়, তাই strip করা হচ্ছে (QuizBot parity)
+                        opts = [re.sub(r'^[A-Da-dক-ঘ][)\.।]\s*', '', str(o)) for o in opts]
                         ans_idx = m.get("answer_index", 0)
                         ans_num = str(ans_idx + 1)
                         all_mcqs_csv.append([m.get("question", ""), opts[0], opts[1], opts[2], opts[3],
@@ -1738,7 +1756,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
                 else:
                     buf.seek(0)
                     caption = f"🟥Ronon Special MCQ System\n🎯Topic: {topic}\n🌟Page No: {fmt_page(page_num)}"
-                    photo_msg = await context.bot.send_photo(chat_id=channel_id, photo=buf, caption=caption)
+                    photo_msg = await context.bot.send_photo(chat_id=channel_id, photo=buf, caption=caption, message_thread_id=thread_id)
                     image_msg_id = photo_msg.message_id
                     if first_image_msg_id is None:
                         first_image_msg_id = image_msg_id
@@ -1763,6 +1781,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
                                     explanation=(explanation or None),
                                     is_anonymous=True,
                                     reply_to_message_id=image_msg_id,
+                                    message_thread_id=thread_id,
                                 )
                                 break
                             except Exception as e:
@@ -1779,12 +1798,13 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
                         await asyncio.sleep(0.4)
 
                     end_text = f"🚀🎯Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n🔗First Poll: {first_poll_link}"
-                    await context.bot.send_message(chat_id=channel_id, text=end_text, reply_to_message_id=image_msg_id)
+                    await context.bot.send_message(chat_id=channel_id, text=end_text, reply_to_message_id=image_msg_id, message_thread_id=thread_id)
 
                     summary_pages.append({"page": page_num, "first_poll": first_poll_link, "mcq_count": len(mcqs)})
 
                     for m in mcqs:
                         opts = m.get("options", ["", "", "", ""])
+                        opts = [re.sub(r'^[A-Da-dক-ঘ][)\.।]\s*', '', str(o)) for o in opts]
                         ans_idx = m.get("answer_index", 0)
                         ans_num = str(ans_idx + 1)
                         all_mcqs_csv.append([m.get("question", ""), opts[0], opts[1], opts[2], opts[3],
@@ -1804,6 +1824,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
                 logger.error(f"[PDF] Page {page_num} error: {e}", exc_info=True)
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
+                await notify_owner(context, f"[PDF] Page {page_num} error:\n{e}")
 
         if all_mcqs_csv:
             csv_buf = io.StringIO()
@@ -1828,6 +1849,8 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
             summary_kwargs = {"chat_id": channel_id, "text": summary, "disable_web_page_preview": True}
             if first_image_msg_id:
                 summary_kwargs["reply_to_message_id"] = first_image_msg_id
+            if thread_id:
+                summary_kwargs["message_thread_id"] = thread_id
             await context.bot.send_message(**summary_kwargs)
 
         context.user_data["pdf_mcqs"] = [
