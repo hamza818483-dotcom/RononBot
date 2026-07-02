@@ -1483,16 +1483,13 @@ async def _html_to_pdf(html: str):
         proc = await asyncio.create_subprocess_exec(
             chromium_bin, "--headless", "--no-sandbox",
             "--disable-gpu", "--disable-dev-shm-usage",
-            "--disable-extensions", "--disable-software-rasterizer",
-            "--single-process", "--no-zygote",
-            "--js-flags=--max-old-space-size=128",
             f"--print-to-pdf={pdf_path}",
             f"file://{html_path}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
@@ -1502,7 +1499,7 @@ async def _html_to_pdf(html: str):
             with open(pdf_path, "rb") as f:
                 return f.read()
         else:
-            logger.error(f"[PDF Gen] chromium produced no file. stderr: {stderr.decode(errors='ignore')[:500]}")
+            logger.error(f"[PDF Gen] chromium produced no file. stderr: {stderr.decode(errors='ignore')[:1500]}")
     except FileNotFoundError:
         logger.error(f"[PDF Gen] chromium binary not found at '{chromium_bin}' — falling back to fpdf2")
     except Exception as e:
