@@ -6,8 +6,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
     chromium \
     fonts-noto \
+    fonts-noto-bengali \
     fonts-noto-color-emoji \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && fc-cache -f
 
 ENV CHROMIUM_PATH=/usr/bin/chromium
 

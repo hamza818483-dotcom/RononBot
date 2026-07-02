@@ -1541,10 +1541,9 @@ def _build_solve_sheet_html(topic: str, page: int, mcqs: list, answers: dict = N
     return f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8">
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;600;700;800&display=swap');
-@page{{size:A4;margin:8mm 10mm;}}
 *{{margin:0;padding:0;box-sizing:border-box;}}
-body{{font-family:'Noto Sans Bengali',sans-serif;background:#fff;font-size:14px;}}
+@page{{size:A4;margin:8mm 10mm;}}
+body{{font-family:'Noto Sans Bengali','Noto Sans','Noto Sans Bengali UI',sans-serif;background:#fff;font-size:14px;}}
 .hdr{{text-align:center;padding:10px 14px;background:#1a237e;color:#fff;margin-bottom:12px;border-radius:8px;}}
 .hdr h1{{font-size:20px;font-weight:800;}}
 .hdr .sub{{font-size:14px;color:#c5cae9;margin-top:3px;}}
