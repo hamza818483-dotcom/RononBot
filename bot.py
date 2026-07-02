@@ -351,13 +351,20 @@ def db_add_channel(channel_id: str, channel_name: str, added_by: int) -> bool:
 
 
 def db_list_channels():
-    if sb:
-        r = sb.table("ronon_channels").select("channel_id,channel_name").order("added_at").execute()
-        return [(row["channel_id"], row["channel_name"]) for row in r.data]
-    conn = db_conn()
-    rows = conn.execute("SELECT channel_id, channel_name FROM channels ORDER BY added_at").fetchall()
-    conn.close()
-    return [(r["channel_id"], r["channel_name"]) for r in rows]
+    try:
+        if sb:
+            r = sb.table("ronon_channels").select("channel_id,channel_name").order("added_at").execute()
+            return [(row["channel_id"], row["channel_name"]) for row in r.data]
+        conn = db_conn()
+        rows = conn.execute("SELECT channel_id, channel_name FROM channels ORDER BY added_at").fetchall()
+        conn.close()
+        return [(r["channel_id"], r["channel_name"]) for r in rows]
+    except Exception as e:
+        # আগে এখানে কোনো try/except ছিল না — Supabase-এ ronon_channels টেবিল না থাকলে বা
+        # কোনো connectivity issue হলে এটা raw exception throw করতো, যেটা /pdf-এর caller-এ
+        # গিয়ে পুরো command-কে silently থামিয়ে দিতো (শুধু owner DM-এ alert যেত, ইউজার কিছুই দেখতো না)
+        logger.error(f"[DB] list_channels error: {e}")
+        return []
 
 
 def db_remove_channel(channel_id: str) -> bool:
@@ -1493,89 +1500,98 @@ def build_pdf_dashboard(file_name, topic, page_status, start_time, total_mcq, to
 async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # NEW: reply-based immediate processing
     if update.message.reply_to_message and update.message.reply_to_message.document:
-        doc = update.message.reply_to_message.document
-        # file_name None হতে পারে (কিছু client/forward-এ metadata থাকে না) — আগে এখানে
-        # .lower() সরাসরি None-এর উপর কল হয়ে crash করতো, পুরো command silently fail করতো।
-        # QuizBot-এর মতোই এখন mime_type দিয়েও PDF চেক করা হয়, filename না থাকলেও কাজ করবে।
-        file_name = doc.file_name or "document.pdf"
-        is_pdf = file_name.lower().endswith(".pdf") or (doc.mime_type == "application/pdf")
+        try:
+            doc = update.message.reply_to_message.document
+            # file_name None হতে পারে (কিছু client/forward-এ metadata থাকে না) — আগে এখানে
+            # .lower() সরাসরি None-এর উপর কল হয়ে crash করতো, পুরো command silently fail করতো।
+            # QuizBot-এর মতোই এখন mime_type দিয়েও PDF চেক করা হয়, filename না থাকলেও কাজ করবে।
+            file_name = doc.file_name or "document.pdf"
+            is_pdf = file_name.lower().endswith(".pdf") or (doc.mime_type == "application/pdf")
 
-        if not is_pdf:
-            # আগে এখানে silently "OLD: awaiting mode"-এ পড়ে যেত, ইউজার কোনো কারণ ছাড়াই
-            # confuse হতো। এখন স্পষ্ট বলে দেওয়া হচ্ছে কেন কাজ করছে না।
-            await update.message.reply_text(
-                f"❌ যে ফাইলে reply করেছ ({file_name}) সেটা PDF না।\n"
-                "PDF ফাইলে reply করে আবার /pdf দাও।"
-            )
-            return
+            if not is_pdf:
+                # আগে এখানে silently "OLD: awaiting mode"-এ পড়ে যেত, ইউজার কোনো কারণ ছাড়াই
+                # confuse হতো। এখন স্পষ্ট বলে দেওয়া হচ্ছে কেন কাজ করছে না।
+                await update.message.reply_text(
+                    f"❌ যে ফাইলে reply করেছ ({file_name}) সেটা PDF না।\n"
+                    "PDF ফাইলে reply করে আবার /pdf দাও।"
+                )
+                return
 
-        text = update.message.text or ""
-        args = context.args
+            text = update.message.text or ""
+            args = context.args
 
-        page_range = None
-        channel_id = None
-        topic = DEFAULT_TOPIC
-        per_page_count = None
-        thread_id = None  # forum/topic group-এ নির্দিষ্ট থ্রেডে পোস্ট করার জন্য (QuizBot-এর -t সাথে মিলিয়ে)
+            page_range = None
+            channel_id = None
+            topic = DEFAULT_TOPIC
+            per_page_count = None
+            thread_id = None  # forum/topic group-এ নির্দিষ্ট থ্রেডে পোস্ট করার জন্য (QuizBot-এর -t সাথে মিলিয়ে)
 
-        i = 0
-        while i < len(args):
-            if args[i] == "-p" and i + 1 < len(args):
-                page_range = args[i + 1]
-                i += 2
-            elif args[i] == "-c" and i + 1 < len(args):
-                channel_id = args[i + 1]
-                i += 2
-            elif args[i] == "-m" and i + 1 < len(args):
-                topic = args[i + 1].strip('"\'')
-                i += 2
-            elif args[i] == "-t" and i + 1 < len(args):
-                # QuizBot-এ -t মানে numeric forum thread_id, topic name না (আগে ভুলভাবে
-                # topic-alias হিসেবে treat করা হতো, যেটা QuizBot-এর সাথে অসামঞ্জস্যপূর্ণ ছিল)
-                if args[i + 1].isdigit():
-                    thread_id = int(args[i + 1])
-                i += 2
+            i = 0
+            while i < len(args):
+                if args[i] == "-p" and i + 1 < len(args):
+                    page_range = args[i + 1]
+                    i += 2
+                elif args[i] == "-c" and i + 1 < len(args):
+                    channel_id = args[i + 1]
+                    i += 2
+                elif args[i] == "-m" and i + 1 < len(args):
+                    topic = args[i + 1].strip('"\'')
+                    i += 2
+                elif args[i] == "-t" and i + 1 < len(args):
+                    # QuizBot-এ -t মানে numeric forum thread_id, topic name না (আগে ভুলভাবে
+                    # topic-alias হিসেবে treat করা হতো, যেটা QuizBot-এর সাথে অসামঞ্জস্যপূর্ণ ছিল)
+                    if args[i + 1].isdigit():
+                        thread_id = int(args[i + 1])
+                    i += 2
+                else:
+                    i += 1
+
+            bracket_match = re.search(r'\[(\d+)\]', text)
+            if bracket_match:
+                per_page_count = int(bracket_match.group(1))
             else:
-                i += 1
+                # trailing plain number = per-page MCQ count (matches QuizBot's -m/-t "Topic" N pattern)
+                nums = re.findall(r'(?<!\d)(\d+)(?!\d)', text.split('/pdf')[1] if '/pdf' in text else text)
+                if nums:
+                    last_num = int(nums[-1])
+                    page_nums = page_range.replace("-", " ").split() if page_range else []
+                    if str(last_num) not in page_nums and last_num < 200:
+                        per_page_count = last_num
 
-        bracket_match = re.search(r'\[(\d+)\]', text)
-        if bracket_match:
-            per_page_count = int(bracket_match.group(1))
-        else:
-            # trailing plain number = per-page MCQ count (matches QuizBot's -m/-t "Topic" N pattern)
-            nums = re.findall(r'(?<!\d)(\d+)(?!\d)', text.split('/pdf')[1] if '/pdf' in text else text)
-            if nums:
-                last_num = int(nums[-1])
-                page_nums = page_range.replace("-", " ").split() if page_range else []
-                if str(last_num) not in page_nums and last_num < 200:
-                    per_page_count = last_num
+            context.user_data["pdf_doc"] = doc
+            context.user_data["pdf_topic"] = topic
+            context.user_data["pdf_page_range"] = page_range
+            context.user_data["pdf_per_page"] = per_page_count
+            context.user_data["pdf_user_id"] = update.effective_user.id
+            context.user_data["pdf_thread_id"] = thread_id
 
-        context.user_data["pdf_doc"] = doc
-        context.user_data["pdf_topic"] = topic
-        context.user_data["pdf_page_range"] = page_range
-        context.user_data["pdf_per_page"] = per_page_count
-        context.user_data["pdf_user_id"] = update.effective_user.id
-        context.user_data["pdf_thread_id"] = thread_id
-
-        if channel_id:
-            await process_pdf(update, context, channel_id)
-        else:
-            channels = db_list_channels()
-            kb = []
-            for cid, cname in channels:
-                kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"pdfch_{cid}")])
-            kb.append([InlineKeyboardButton("📄 CSV File Only", callback_data="pdf_csv_only")])
-            no_channel_note = "" if channels else "\n\n⚠️ কোনো চ্যানেল যোগ করা নেই — /channel দিয়ে যোগ করো, অথবা CSV Only বেছে নাও।"
-            await update.message.reply_text(
-                f"📋 <b>{file_name}</b>\n"
-                f"🎯 Topic: <b>{topic}</b>\n"
-                f"📄 Page Range: <b>{page_range or 'All'}</b>\n"
-                f"🎯 Per Page MCQ: <b>{per_page_count or 'Highest Possible'}</b>\n\n"
-                f"Channel select করো:{no_channel_note}",
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup(kb)
-            )
-        return
+            if channel_id:
+                await process_pdf(update, context, channel_id)
+            else:
+                channels = db_list_channels()
+                kb = []
+                for cid, cname in channels:
+                    kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"pdfch_{cid}")])
+                kb.append([InlineKeyboardButton("📄 CSV File Only", callback_data="pdf_csv_only")])
+                no_channel_note = "" if channels else "\n\n⚠️ কোনো চ্যানেল যোগ করা নেই — /channel দিয়ে যোগ করো, অথবা CSV Only বেছে নাও।"
+                await update.message.reply_text(
+                    f"📋 <b>{file_name}</b>\n"
+                    f"🎯 Topic: <b>{topic}</b>\n"
+                    f"📄 Page Range: <b>{page_range or 'All'}</b>\n"
+                    f"🎯 Per Page MCQ: <b>{per_page_count or 'Highest Possible'}</b>\n\n"
+                    f"Channel select করো:{no_channel_note}",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(kb)
+                )
+            return
+        except Exception as e:
+            # আগে এখানে কোনো safety net ছিল না — /pdf reply দেওয়ার পর args parsing বা
+            # db_list_channels-এর মতো কোনো ধাপে unexpected error হলে ইউজার কিছুই দেখতো না
+            # ("no response" সমস্যা)। এখন থেকে যেকোনো ব্যর্থতায় সরাসরি user-কে জানানো হবে।
+            logger.error(f"[cmd_pdf] Unexpected error: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ কিছু একটা ভুল হয়েছে: {e}")
+            await notify_owner(context, f"[cmd_pdf] Error for user {update.effective_user.id}:\n{e}")
+            return
 
     # OLD: set awaiting mode
     context.user_data["awaiting_pdf"] = True
