@@ -1498,7 +1498,7 @@ async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         pdf_bytes = generate_pdf(mcqs, topic, watermark)
 
-        await query.edit_message_text("📄 CSV + PDF তৈরি হচ্ছে...")
+        status_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text="📄 CSV + PDF তৈরি হচ্ছে...")
 
         await context.bot.send_document(
             chat_id=update.effective_chat.id,
@@ -1518,6 +1518,7 @@ async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=f"📑 <b>{topic}</b> — MCQ PDF File\nমোট: {len(mcqs)}টি",
                 parse_mode=ParseMode.HTML
             )
+        await status_msg.edit_text("✅ CSV + PDF পাঠানো হয়েছে।")
         return
 
     if data in ("imgmode_image", "imgmode_topic"):
@@ -1528,8 +1529,9 @@ async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for cid, cname in channels:
             kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"imgch_{cid}")])
         kb.append([InlineKeyboardButton("📄 CSV + PDF", callback_data="img_csv_pdf")])
-        await query.edit_message_text(
-            f"📢 কোন channel-এ পাঠাবে?\n📌 Topic: <b>{topic}</b>",
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"📢 কোন channel-এ পাঠাবে?\n📌 Topic: <b>{topic}</b>",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(kb)
         )
@@ -1557,13 +1559,16 @@ async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pre_msg = await context.bot.send_message(chat_id=channel_id, text=pre_text, parse_mode=ParseMode.HTML,
                                                        reply_to_message_id=image_msg_id if image_msg_id else None)
         except Exception as e:
-            await query.edit_message_text(f"❌ চ্যানেলে পাঠাতে ব্যর্থ: {e}")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ চ্যানেলে পাঠাতে ব্যর্থ: {e}")
             return
 
         # Reply target for every poll + the end/summary message: prefer image, fallback to pre_text msg
         reply_target_id = image_msg_id if image_msg_id else pre_msg.message_id
 
-        progress_msg = await query.edit_message_text(f"⏳ 📢 চ্যানেলে {len(mcqs)}টি poll পাঠানো হচ্ছে...\n[░░░░░░░░░░] 0%")
+        progress_msg = await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"⏳ 📢 চ্যানেলে {len(mcqs)}টি poll পাঠানো হচ্ছে...\n[░░░░░░░░░░] 0%"
+        )
 
         sent, first_link = await send_mcqs_as_polls(
             context, user_id, mcqs, channel_id, return_first_link=True,
