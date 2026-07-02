@@ -10,6 +10,8 @@ import sqlite3
 import logging
 import asyncio
 import base64
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import BytesIO
 from datetime import datetime
 
@@ -662,6 +664,29 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
+# HEALTH SERVER — Render Web Service requires a bound $PORT.
+# Bot runs in polling mode (no HTTP server otherwise), so Render would
+# mark the service unhealthy/sleep it. This minimal server fixes that.
+# ============================================================
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        pass  # silence default access logs
+
+
+def start_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    logger.info(f"🩺 Health server listening on 0.0.0.0:{port}")
+    server.serve_forever()
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -670,6 +695,8 @@ def main():
         raise SystemExit("❌ BOT_TOKEN environment variable সেট করা নেই।")
 
     db_init()
+
+    threading.Thread(target=start_health_server, daemon=True).start()
 
     app = Application.builder().token(BOT_TOKEN).build()
 

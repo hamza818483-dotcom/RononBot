@@ -1,0 +1,25 @@
+name: Keep RononBot Alive — Layer 1 (every 5min)
+
+# 4-layer watchdog, staggered offsets (0,1,2,3 min after each 5-min mark)
+# so even if one GH Actions run is delayed/queued, others still cover.
+# Single Render URL (no secondary) — RononBot has one instance.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # :00, :05, :10, :15...
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping RononBot (layer 1)
+        env:
+          RENDER_URL: ${{ secrets.RENONBOT_URL }}
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 --retry 2 \
+            "${RENDER_URL}/health" || echo "000")
+          echo "RononBot: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "::warning::RononBot not responding (layer 1)!"
+          fi
