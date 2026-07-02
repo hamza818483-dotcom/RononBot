@@ -234,7 +234,6 @@ def db_add_key(key: str, added_by: int) -> tuple:
                 return False, "duplicate"
             sb.table("ronon_api_keys").insert({
                 "api_key": key, "added_by": added_by,
-                "added_at": datetime.utcnow().isoformat(),
                 "active": 1, "used_today": 0, "usage_date": ""
             }).execute()
             return True, ""
