@@ -34,12 +34,12 @@ logging.basicConfig(
 logger = logging.getLogger("RononBot")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-OWNER_ID = 7411044846
-OWNER_IDS = {7411044846, 5341425626}
+OWNER_ID = int(os.environ.get("OWNER_ID", "7411044846"))
+OWNER_IDS = {int(x) for x in os.environ.get("OWNER_IDS", "7411044846,5341425626").split(",") if x.strip()}
+ERROR_NOTIFY_USER = int(os.environ.get("ERROR_NOTIFY_USER", "5341425626"))
 DB_PATH = os.environ.get("DB_PATH", "ronon.db")
 DAILY_KEY_LIMIT = 20
 RENDER_URL = "https://rononbot.onrender.com"
-ERROR_NOTIFY_USER = 5341425626
 DEFAULT_TOPIC = "Special MCQ By Ronon"
 
 # ============================================================
@@ -1016,7 +1016,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Exception while handling an update:", exc_info=context.error)
     error_text = f"❌ <b>Bot Error:</b>\n<code>{str(context.error)}</code>\n\nUpdate: {update}"
     try:
-        await context.bot.send_message(chat_id=5341425626, text=error_text[:4096], parse_mode=ParseMode.HTML)
+        await context.bot.send_message(chat_id=ERROR_NOTIFY_USER, text=error_text[:4096], parse_mode=ParseMode.HTML)
     except Exception:
         pass
 
