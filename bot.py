@@ -880,10 +880,41 @@ def parse_page_range(range_str: str, total_pages: int) -> list:
     return sorted(pages) if pages else list(range(1, total_pages + 1))
 
 
-async def send_mcqs_as_polls(context: ContextTypes.DEFAULT_TYPE, user_id: int, mcqs: list, chat_id: int, return_first_link: bool = False):
+async def _animate_generation_progress(msg, start_time: float, est_total: float = 18.0):
+    """Gemini generation চলাকালীন smooth % + ETA বার দেখানোর জন্য background animation।
+    Actual completion time অজানা তাই একটা estimated-total (18s) এর ভিত্তিতে % বাড়ে,
+    কিন্তু কখনো 95%-এর বেশি যায় না — আসল রেজাল্ট এলেই caller সেটা 100%-এ নিয়ে যাবে।"""
+    bar_len = 10
+    try:
+        while True:
+            await asyncio.sleep(2.0)
+            elapsed = time.monotonic() - start_time
+            pct = min(95, int((elapsed / est_total) * 100))
+            filled = int(bar_len * pct / 100)
+            bar = "▓" * filled + "░" * (bar_len - filled)
+            remaining = max(1, int(est_total - elapsed))
+            try:
+                await msg.edit_text(
+                    f"⏳ ছবি থেকে MCQ generate হচ্ছে (Gemini AI)...\n"
+                    f"[{bar}] ~{pct}%\n"
+                    f"⏱️ আনুমানিক বাকি সময়: ~{remaining}s"
+                )
+            except Exception:
+                pass
+    except asyncio.CancelledError:
+        pass
+
+
+async def send_mcqs_as_polls(context: ContextTypes.DEFAULT_TYPE, user_id: int, mcqs: list, chat_id: int,
+                              return_first_link: bool = False, reply_to_message_id: int = None,
+                              progress_msg=None, progress_prefix: str = ""):
     sent = 0
     first_link = None
-    for mcq in mcqs:
+    total = len(mcqs)
+    start_time = time.monotonic()
+    last_edit = 0.0
+
+    for i, mcq in enumerate(mcqs):
         q_text = build_question_text(user_id, mcq.get("question", ""))
         explanation = build_final_explanation(user_id, mcq.get("explanation", ""))
         opts = mcq.get("options", [])
@@ -901,6 +932,7 @@ async def send_mcqs_as_polls(context: ContextTypes.DEFAULT_TYPE, user_id: int, m
                     correct_option_id=mcq.get("answer_index", 0),
                     explanation=explanation or None,
                     is_anonymous=True,
+                    reply_to_message_id=reply_to_message_id,
                 )
                 ok = True
                 if sent == 0 and str(chat_id).startswith("-100"):
@@ -911,6 +943,32 @@ async def send_mcqs_as_polls(context: ContextTypes.DEFAULT_TYPE, user_id: int, m
                 await asyncio.sleep(2)
         if ok:
             sent += 1
+
+        # Live % progress + ETA update on the tracking message (throttled to ~every 2s)
+        if progress_msg is not None:
+            now = time.monotonic()
+            if now - last_edit >= 2.0 or (i + 1) == total:
+                elapsed = now - start_time
+                done = i + 1
+                pct = int((done / total) * 100) if total else 100
+                avg = elapsed / done if done else 0
+                remaining = max(0, total - done)
+                eta_sec = int(avg * remaining)
+                bar_len = 10
+                filled = int(bar_len * pct / 100)
+                bar = "▓" * filled + "░" * (bar_len - filled)
+                try:
+                    await progress_msg.edit_text(
+                        f"{progress_prefix}⏳ Poll পাঠানো হচ্ছে...\n"
+                        f"[{bar}] {pct}%\n"
+                        f"📊 {done}/{total} সম্পন্ন\n"
+                        f"⏱️ বাকি সময়: ~{eta_sec}s",
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception:
+                    pass
+                last_edit = now
+
         await asyncio.sleep(0.4)
     return (sent, first_link) if return_first_link else sent
 
@@ -1360,12 +1418,20 @@ async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
         topic = " ".join(context.args).strip() if context.args else DEFAULT_TOPIC
         photo = update.message.reply_to_message.photo[-1]
 
-        wait_msg = await update.message.reply_text("⏳ ছবি থেকে MCQ generate হচ্ছে...")
+        wait_msg = await update.message.reply_text("⏳ ছবি ডাউনলোড হচ্ছে...\n[░░░░░░░░░░] 0%")
         try:
             file = await context.bot.get_file(photo.file_id)
             img_bytes = bytes(await file.download_as_bytearray())
 
-            mcqs, error = await gemini_generate_mcq(img_bytes, "image/jpeg", topic=topic, page=1)
+            await wait_msg.edit_text("⏳ ছবি থেকে MCQ generate হচ্ছে (Gemini AI)...\n[▓▓▓░░░░░░░] ~30%\n⏱️ আনুমানিক সময়: ~10-20s")
+
+            gen_start = time.monotonic()
+            progress_task = asyncio.create_task(_animate_generation_progress(wait_msg, gen_start))
+            try:
+                mcqs, error = await gemini_generate_mcq(img_bytes, "image/jpeg", topic=topic, page=1)
+            finally:
+                progress_task.cancel()
+
             if error or not mcqs:
                 await wait_msg.edit_text(error or "❌ কোনো MCQ বানানো যায়নি।")
                 return
@@ -1375,6 +1441,11 @@ async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["img_user_id"] = update.effective_user.id
             context.user_data["img_bytes"] = img_bytes
 
+            gen_elapsed = int(time.monotonic() - gen_start)
+            try:
+                await wait_msg.edit_text(f"✅ MCQ Generate সম্পন্ন! [▓▓▓▓▓▓▓▓▓▓] 100% ({gen_elapsed}s)")
+            except Exception:
+                pass
             await wait_msg.delete()
 
             kb = [
@@ -1481,22 +1552,30 @@ async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         pre_text = f"🎯 <b>{topic}</b>\n📊 MCQ Polls Starting...\nমোট প্রশ্ন: {len(mcqs)}"
         try:
-            await context.bot.send_message(chat_id=channel_id, text=pre_text, parse_mode=ParseMode.HTML,
-                                            reply_to_message_id=image_msg_id if image_msg_id else None)
+            pre_msg = await context.bot.send_message(chat_id=channel_id, text=pre_text, parse_mode=ParseMode.HTML,
+                                                       reply_to_message_id=image_msg_id if image_msg_id else None)
         except Exception as e:
             await query.edit_message_text(f"❌ চ্যানেলে পাঠাতে ব্যর্থ: {e}")
             return
 
-        await query.edit_message_text(f"⏳ 📢 চ্যানেলে {len(mcqs)}টি poll পাঠানো হচ্ছে...")
+        # Reply target for every poll + the end/summary message: prefer image, fallback to pre_text msg
+        reply_target_id = image_msg_id if image_msg_id else pre_msg.message_id
 
-        sent, first_link = await send_mcqs_as_polls(context, user_id, mcqs, channel_id, return_first_link=True)
+        progress_msg = await query.edit_message_text(f"⏳ 📢 চ্যানেলে {len(mcqs)}টি poll পাঠানো হচ্ছে...\n[░░░░░░░░░░] 0%")
+
+        sent, first_link = await send_mcqs_as_polls(
+            context, user_id, mcqs, channel_id, return_first_link=True,
+            reply_to_message_id=reply_target_id,
+            progress_msg=progress_msg
+        )
 
         end_text = f"✅ MCQ Polls Completed!\n📊 Total: {sent} polls\n🏷️ Topic: {topic}"
         if first_link:
             end_text += f"\n🔗 First Poll Link:\n{first_link}"
-        await context.bot.send_message(chat_id=channel_id, text=end_text, parse_mode=ParseMode.HTML)
+        await context.bot.send_message(chat_id=channel_id, text=end_text, parse_mode=ParseMode.HTML,
+                                        reply_to_message_id=reply_target_id)
 
-        await query.edit_message_text(f"✅ {sent}টি poll চ্যানেলে পাঠানো হয়েছে!")
+        await progress_msg.edit_text(f"✅ {sent}টি poll চ্যানেলে পাঠানো হয়েছে!")
         return
 
 
