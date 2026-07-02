@@ -1321,37 +1321,13 @@ async def exp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data == "exp_own":
             settings = db_get_settings(user_id)
-            is_on = bool(settings.get("own_explanation_on"))
             current_text = settings.get("own_explanation") or "(সেট করা নেই)"
             kb = [
-                [InlineKeyboardButton(
-                    f"{'✅ ON' if is_on else '⬜ OFF'} — Toggle",
-                    callback_data="exp_own_toggle"
-                )],
                 [InlineKeyboardButton("✏️ Edit/Set Own Explanation", callback_data="exp_own_edit")],
             ]
             await query.message.reply_text(
                 f"✍️ <b>Own Explanation</b>\n\nবর্তমান টেক্সট:\n<code>{current_text}</code>\n\n"
-                f"Status: {'🟢 ON (সব poll-এ এটাই বসবে)' if is_on else '🔴 OFF'}",
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup(kb)
-            )
-
-        elif data == "exp_own_toggle":
-            settings = db_get_settings(user_id)
-            new_state = 0 if settings.get("own_explanation_on") else 1
-            db_update_settings(user_id, own_explanation_on=new_state)
-            kb = [
-                [InlineKeyboardButton(
-                    f"{'✅ ON' if new_state else '⬜ OFF'} — Toggle",
-                    callback_data="exp_own_toggle"
-                )],
-                [InlineKeyboardButton("✏️ Edit/Set Own Explanation", callback_data="exp_own_edit")],
-            ]
-            current_text = settings.get("own_explanation") or "(সেট করা নেই)"
-            await query.edit_message_text(
-                f"✍️ <b>Own Explanation</b>\n\nবর্তমান টেক্সট:\n<code>{current_text}</code>\n\n"
-                f"Status: {'🟢 ON (সব poll-এ এটাই বসবে)' if new_state else '🔴 OFF'}",
+                f"⚠️ Set করলেই এটা 100% সব poll-এর explanation হিসেবে বসবে (AI explanation override হবে)।",
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup(kb)
             )
@@ -1383,8 +1359,8 @@ async def handle_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if context.user_data.get("awaiting_own_exp"):
         context.user_data["awaiting_own_exp"] = False
-        db_update_settings(user_id, own_explanation=text.strip())
-        await update.message.reply_text("✅ Own explanation সেভ হয়েছে।")
+        db_update_settings(user_id, own_explanation=text.strip(), own_explanation_on=1)
+        await update.message.reply_text("✅ Own explanation সেভ হয়েছে — এখন থেকে 100% সব poll-এ এটাই বসবে।")
         return
 
     if context.user_data.get("awaiting_channel_add"):
