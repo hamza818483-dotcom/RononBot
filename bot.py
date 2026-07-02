@@ -12,6 +12,7 @@ import asyncio
 import base64
 import csv
 import io
+import time
 from datetime import datetime, timedelta
 from io import BytesIO
 
@@ -1308,8 +1309,43 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# /pdf — Reply-based (new) + Old awaiting mode
+# /pdf — Reply-based (100% ported from QuizBot's /pdf: live dashboard,
+# per-page progress, poll retry, first-poll-link summary, CSV export)
 # ============================================================
+
+def fmt_page(n: int) -> str:
+    return str(n).zfill(2)
+
+
+def build_pdf_dashboard(file_name, topic, page_status, start_time, total_mcq, total_polls):
+    elapsed = int(time.time() - start_time)
+    mins, secs = divmod(elapsed, 60)
+    done = sum(1 for s in page_status if s["done"])
+    total = len(page_status)
+    pct = int(done / total * 100) if total else 0
+    bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+    lines = [
+        "⏳ <b>Ronon PDF Processing...</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"📄 File: {file_name}", f"🎯 Topic: {topic}", f"📋 Pages: {total} total",
+        "━━━━━━━━━━━━━━━━━━━━━━"
+    ]
+    for s in page_status:
+        if s["done"]:
+            lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ ✓")
+        elif s["current"]:
+            lines.append(f"⏳ Page {fmt_page(s['page'])}: Processing...")
+        else:
+            lines.append(f"⬜ Page {fmt_page(s['page'])}: Waiting")
+    lines += [
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"📊 Progress: {pct}% [{bar}]",
+        f"⏱️ Elapsed: {mins}:{secs:02d}",
+        f"📝 MCQ done: {total_mcq}",
+        f"🔄 Polls sent: {total_polls}"
+    ]
+    return "\n".join(lines)
+
 
 @require_permit
 async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1346,6 +1382,14 @@ async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bracket_match = re.search(r'\[(\d+)\]', text)
             if bracket_match:
                 per_page_count = int(bracket_match.group(1))
+            else:
+                # trailing plain number = per-page MCQ count (matches QuizBot's -m/-t "Topic" N pattern)
+                nums = re.findall(r'(?<!\d)(\d+)(?!\d)', text.split('/pdf')[1] if '/pdf' in text else text)
+                if nums:
+                    last_num = int(nums[-1])
+                    page_nums = page_range.replace("-", " ").split() if page_range else []
+                    if str(last_num) not in page_nums and last_num < 200:
+                        per_page_count = last_num
 
             context.user_data["pdf_doc"] = doc
             context.user_data["pdf_topic"] = topic
@@ -1358,19 +1402,20 @@ async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 channels = db_list_channels()
                 if not channels:
-                    await update.message.reply_text("❌ কোনো চ্যানেল যোগ করা নেই। /channel দিয়ে যোগ করুন।")
+                    # No channels configured — process straight to CSV only, same as QuizBot's fallback
+                    await process_pdf(update, context, None, csv_only=True)
                     return
 
                 kb = []
                 for cid, cname in channels:
                     kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"pdfch_{cid}")])
-                kb.append([InlineKeyboardButton("📄 CSV + PDF", callback_data="pdf_csv_pdf")])
+                kb.append([InlineKeyboardButton("📄 CSV File Only", callback_data="pdf_csv_only")])
                 await update.message.reply_text(
-                    f"📄 PDF: <b>{doc.file_name}</b>\n"
+                    f"📋 <b>{doc.file_name}</b>\n"
                     f"🎯 Topic: <b>{topic}</b>\n"
                     f"📄 Page Range: <b>{page_range or 'All'}</b>\n"
                     f"🎯 Per Page MCQ: <b>{per_page_count or 'Highest Possible'}</b>\n\n"
-                    f"কোথায় পাঠাবেন?",
+                    f"Channel select করো:",
                     parse_mode=ParseMode.HTML,
                     reply_markup=InlineKeyboardMarkup(kb)
                 )
@@ -1394,6 +1439,10 @@ async def pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("pdfch_"):
         channel_id = data[len("pdfch_"):]
         await process_pdf(update, context, channel_id, status_message=query.message)
+        return
+
+    if data == "pdf_csv_only":
+        await process_pdf(update, context, None, csv_only=True, status_message=query.message)
         return
 
     if data == "pdf_csv_pdf":
@@ -1435,12 +1484,19 @@ async def pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_id: str, status_message=None):
+async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_id, csv_only: bool = False, status_message=None):
+    """
+    100% ported from QuizBot's process_pdf_pages: live editing dashboard with
+    per-page status + progress bar, poll send with 3x retry, first-poll-link
+    per page summarized at the end, full CSV export of all extracted MCQ.
+    """
     doc = context.user_data.get("pdf_doc")
     topic = context.user_data.get("pdf_topic", DEFAULT_TOPIC)
     page_range = context.user_data.get("pdf_page_range")
     per_page = context.user_data.get("pdf_per_page")
     user_id = context.user_data.get("pdf_user_id", update.effective_user.id)
+    chat_id = update.effective_chat.id
+    uname = update.effective_user.first_name or "User"
 
     if not doc:
         text = "❌ ডেটা মেয়াদ উত্তীর্ণ।"
@@ -1451,7 +1507,9 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
         return
 
     if not status_message:
-        status_message = await update.message.reply_text("⏳ PDF processing হচ্ছে...")
+        status_message = await update.message.reply_text("⏳ PDF download হচ্ছে...")
+    else:
+        await status_message.edit_text("⏳ PDF download হচ্ছে...")
 
     try:
         file = await context.bot.get_file(doc.file_id)
@@ -1461,66 +1519,171 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
 
         pdf_info = await asyncio.to_thread(pdfinfo_from_bytes, pdf_bytes)
         total_pages = int(pdf_info["Pages"])
-
         pages_to_process = parse_page_range(page_range, total_pages)
 
         if not pages_to_process:
             await status_message.edit_text("❌ কোনো পেজ সিলেক্ট করা যায়নি।")
             return
 
-        min_page = min(pages_to_process)
-        max_page = max(pages_to_process)
-
+        min_page, max_page = min(pages_to_process), max(pages_to_process)
         images = await asyncio.to_thread(
             convert_from_bytes, pdf_bytes, dpi=150,
             first_page=min_page, last_page=max_page
         )
 
-        page_images = {}
+        pages = []
         for idx, img in enumerate(images):
             actual_page = min_page + idx
             if actual_page in pages_to_process:
-                page_images[actual_page] = img
+                pages.append((actual_page, img))
+        pages.sort(key=lambda x: x[0])
 
-        pre_text = (f"🎯 <b>{topic}</b>\n📄 PDF MCQ Polls Starting...\n"
-                    f"📄 Pages: {', '.join(str(p) for p in pages_to_process)}\n"
-                    f"মোট পেজ: {len(page_images)}")
-        await context.bot.send_message(chat_id=channel_id, text=pre_text, parse_mode=ParseMode.HTML)
-
-        total_sent = 0
-        total_mcqs = 0
-        all_mcqs = []
-
-        for page_num in sorted(page_images.keys()):
-            img = page_images[page_num]
-
-            buf = BytesIO()
-            img.save(buf, format="JPEG")
-            buf.seek(0)
-            await context.bot.send_photo(chat_id=channel_id, photo=buf, caption=f"📄 Page {page_num}")
-
-            page_bytes = buf.getvalue()
-            mcqs, error = await gemini_generate_mcq(page_bytes, "image/jpeg", per_page, topic=topic, page=page_num)
-            if error or not mcqs:
-                continue
-
-            all_mcqs.extend(mcqs)
-            total_mcqs += len(mcqs)
-            sent = await send_mcqs_as_polls(context, user_id, mcqs, channel_id)
-            total_sent += sent
-
-            await status_message.edit_text(f"⏳ Page {page_num} complete... Total polls: {total_sent}")
-
-        end_text = f"✅ PDF MCQ Polls Completed!\n📊 Total Polls: {total_sent}\n🏷️ Topic: {topic}"
-        await context.bot.send_message(chat_id=channel_id, text=end_text, parse_mode=ParseMode.HTML)
-
-        # Store all mcqs for CSV+PDF generation
-        context.user_data["pdf_mcqs"] = all_mcqs
-        context.user_data["pdf_topic"] = topic
+        page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
+        start_time = time.time()
+        total_mcq = 0
+        total_polls = 0
 
         await status_message.edit_text(
-            f"✅ সর্বমোট {total_sent}টি MCQ poll চ্যানেলে পাঠানো হয়েছে!\n"
-            f"📄 {len(page_images)}টি পেজ প্রসেস করা হয়েছে।"
+            build_pdf_dashboard(doc.file_name, topic, page_status, start_time, 0, 0),
+            parse_mode=ParseMode.HTML
+        )
+
+        summary_pages = []
+        all_mcqs_csv = []
+        first_image_msg_id = None
+
+        for idx, (page_num, img) in enumerate(pages):
+            page_status[idx]["current"] = True
+            await status_message.edit_text(
+                build_pdf_dashboard(doc.file_name, topic, page_status, start_time, total_mcq, total_polls),
+                parse_mode=ParseMode.HTML
+            )
+
+            try:
+                buf = BytesIO()
+                img.save(buf, format="JPEG")
+                page_bytes = buf.getvalue()
+
+                mcqs, error = await gemini_generate_mcq(page_bytes, "image/jpeg", per_page, topic=topic, page=page_num)
+                if error or not mcqs:
+                    page_status[idx]["current"] = False
+                    page_status[idx]["done"] = True
+                    continue
+
+                if csv_only:
+                    for m in mcqs:
+                        opts = m.get("options", ["", "", "", ""])
+                        ans_idx = m.get("answer_index", 0)
+                        ans_num = str(ans_idx + 1)
+                        all_mcqs_csv.append([m.get("question", ""), opts[0], opts[1], opts[2], opts[3],
+                                              ans_num, m.get("explanation", ""), "1", "1"])
+                else:
+                    buf.seek(0)
+                    caption = f"🟥Ronon Special MCQ System\n🎯Topic: {topic}\n🌟Page No: {fmt_page(page_num)}"
+                    photo_msg = await context.bot.send_photo(chat_id=channel_id, photo=buf, caption=caption)
+                    image_msg_id = photo_msg.message_id
+                    if first_image_msg_id is None:
+                        first_image_msg_id = image_msg_id
+
+                    first_poll_link = ""
+                    for i, mcq in enumerate(mcqs):
+                        q_text = build_question_text(user_id, mcq.get("question", ""))
+                        explanation = build_final_explanation(user_id, mcq.get("explanation", ""))
+                        opts = mcq.get("options", [])
+                        if len(opts) < 4:
+                            continue
+                        # Retry logic — poll অবশ্যই যেতে হবে (3x retry, matches QuizBot)
+                        poll_msg = None
+                        for _attempt in range(3):
+                            try:
+                                poll_msg = await context.bot.send_poll(
+                                    chat_id=channel_id,
+                                    question=q_text,
+                                    options=opts[:4],
+                                    type="quiz",
+                                    correct_option_id=mcq.get("answer_index", 0),
+                                    explanation=(explanation or None),
+                                    is_anonymous=True,
+                                    reply_to_message_id=image_msg_id,
+                                )
+                                break
+                            except Exception as e:
+                                logger.warning(f"[PDF] Poll attempt {_attempt+1} failed: {e}")
+                                await asyncio.sleep(2)
+                        if poll_msg and i == 0:
+                            cid_str = str(channel_id)
+                            if cid_str.startswith("-100"):
+                                first_poll_link = f"https://t.me/c/{cid_str[4:]}/{poll_msg.message_id}"
+                            else:
+                                first_poll_link = f"https://t.me/{cid_str.lstrip('@')}/{poll_msg.message_id}"
+                        if poll_msg:
+                            total_polls += 1
+                        await asyncio.sleep(0.4)
+
+                    end_text = f"🚀🎯Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n🔗First Poll: {first_poll_link}"
+                    await context.bot.send_message(chat_id=channel_id, text=end_text, reply_to_message_id=image_msg_id)
+
+                    summary_pages.append({"page": page_num, "first_poll": first_poll_link, "mcq_count": len(mcqs)})
+
+                    for m in mcqs:
+                        opts = m.get("options", ["", "", "", ""])
+                        ans_idx = m.get("answer_index", 0)
+                        ans_num = str(ans_idx + 1)
+                        all_mcqs_csv.append([m.get("question", ""), opts[0], opts[1], opts[2], opts[3],
+                                              ans_num, m.get("explanation", ""), "1", "1"])
+
+                total_mcq += len(mcqs)
+                page_status[idx]["done"] = True
+                page_status[idx]["current"] = False
+                page_status[idx]["mcq"] = len(mcqs)
+                await status_message.edit_text(
+                    build_pdf_dashboard(doc.file_name, topic, page_status, start_time, total_mcq, total_polls),
+                    parse_mode=ParseMode.HTML
+                )
+
+            except Exception as e:
+                logger.error(f"[PDF] Page {page_num} error: {e}", exc_info=True)
+                page_status[idx]["current"] = False
+                page_status[idx]["done"] = True
+
+        if all_mcqs_csv:
+            csv_buf = io.StringIO()
+            writer = csv.writer(csv_buf)
+            writer.writerow(["questions", "option1", "option2", "option3", "option4",
+                              "answer", "explanation", "type", "section"])
+            for row in all_mcqs_csv:
+                writer.writerow(row)
+            csv_bio = io.BytesIO(csv_buf.getvalue().encode("utf-8"))
+            csv_bio.name = f"{topic}_mcq.csv"
+            await context.bot.send_document(
+                chat_id=chat_id, document=csv_bio, filename=f"{topic}_mcq.csv",
+                caption=f"📄 {topic} — {len(all_mcqs_csv)} MCQ"
+            )
+
+        if not csv_only and summary_pages:
+            total_mcq_sum = sum(p["mcq_count"] for p in summary_pages)
+            summary = f"🟥Ronon Special Practice System\n🎯Topic: {topic}\n🚀Total MCQ: {total_mcq_sum}\n\n"
+            for p in summary_pages:
+                summary += f"🌟Page-{fmt_page(p['page'])}:\n{p['first_poll']}\n"
+            summary += f"\n💥শুভকামনা প্রিয় শিক্ষার্থী {uname}...\n"
+            summary_kwargs = {"chat_id": channel_id, "text": summary, "disable_web_page_preview": True}
+            if first_image_msg_id:
+                summary_kwargs["reply_to_message_id"] = first_image_msg_id
+            await context.bot.send_message(**summary_kwargs)
+
+        context.user_data["pdf_mcqs"] = [
+            {"question": r[0], "options": [r[1], r[2], r[3], r[4]],
+             "answer_index": int(r[5]) - 1, "explanation": r[6]}
+            for r in all_mcqs_csv
+        ]
+        context.user_data["pdf_topic"] = topic
+
+        elapsed = int(time.time() - start_time)
+        mins, secs = divmod(elapsed, 60)
+        await status_message.edit_text(
+            f"✅ <b>Processing Complete!</b>\n\n📄 File: {doc.file_name}\n🎯 Topic: {topic}\n"
+            f"📝 Total MCQ: {total_mcq}\n📋 Pages: {len(pages)}\n⏱️ Time: {mins}:{secs:02d}",
+            parse_mode=ParseMode.HTML
         )
 
     except Exception as e:
