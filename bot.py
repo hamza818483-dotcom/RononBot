@@ -10,7 +10,6 @@ import sqlite3
 import logging
 import asyncio
 import base64
-import threading
 import csv
 import io
 from datetime import datetime, timedelta
@@ -409,27 +408,33 @@ def parse_mcq_json(text: str) -> list:
     valid = []
     letter_map = {"A": 0, "B": 1, "C": 2, "D": 3}
     for m in data:
-        if not all(k in m for k in ("question", "options", "answer")):
-            continue
-        opts = m.get("options", [])
-        if len(opts) < 4:
-            continue
-        opts = [str(o).strip() for o in opts[:4]]
-        ans = m.get("answer", "A")
-        if isinstance(ans, str):
-            ans_idx = letter_map.get(ans.strip().upper()[:1], None)
-            if ans_idx is None:
+        try:
+            if not isinstance(m, dict):
                 continue
-        elif isinstance(ans, int) and 0 <= ans <= 3:
-            ans_idx = ans
-        else:
+            if not all(k in m for k in ("question", "options", "answer")):
+                continue
+            opts = m.get("options", [])
+            if not isinstance(opts, list) or len(opts) < 4:
+                continue
+            opts = [str(o).strip() for o in opts[:4]]
+            ans = m.get("answer", "A")
+            if isinstance(ans, str):
+                ans_idx = letter_map.get(ans.strip().upper()[:1], None)
+                if ans_idx is None:
+                    continue
+            elif isinstance(ans, int) and 0 <= ans <= 3:
+                ans_idx = ans
+            else:
+                continue
+            valid.append({
+                "question": str(m.get("question", "")).strip(),
+                "options": opts,
+                "answer_index": ans_idx,
+                "explanation": str(m.get("explanation", "")).strip(),
+            })
+        except Exception as e:
+            logger.warning(f"parse_mcq_json: skipped malformed item: {e}")
             continue
-        valid.append({
-            "question": str(m.get("question", "")).strip(),
-            "options": opts,
-            "answer_index": ans_idx,
-            "explanation": str(m.get("explanation", "")).strip(),
-        })
     return valid
 
 
@@ -463,16 +468,21 @@ def generate_csv(mcqs: list) -> bytes:
     writer = csv.writer(output)
     writer.writerow(["question", "option1", "option2", "option3", "option4", "option5", "answer", "explanation", "type", "section"])
     for m in mcqs:
-        opts = m["options"][:4] + [""] * (5 - len(m["options"]))
-        ans = m["answer_index"] + 1
-        writer.writerow([
-            m["question"],
-            opts[0], opts[1], opts[2], opts[3], opts[4],
-            ans,
-            m.get("explanation", ""),
-            1,
-            1,
-        ])
+        try:
+            opts_raw = m.get("options", [])
+            opts = opts_raw[:4] + [""] * (5 - len(opts_raw))
+            ans = m.get("answer_index", 0) + 1
+            writer.writerow([
+                m.get("question", ""),
+                opts[0], opts[1], opts[2], opts[3], opts[4],
+                ans,
+                m.get("explanation", ""),
+                1,
+                1,
+            ])
+        except Exception as e:
+            logger.warning(f"generate_csv: skipped malformed item: {e}")
+            continue
     return output.getvalue().encode('utf-8-sig')
 
 
@@ -639,14 +649,18 @@ async def send_mcqs_as_polls(context: ContextTypes.DEFAULT_TYPE, user_id: int, m
     sent = 0
     for mcq in mcqs:
         try:
-            q_text = build_question_text(user_id, mcq["question"])
+            q_text = build_question_text(user_id, mcq.get("question", ""))
             explanation = build_final_explanation(user_id, mcq.get("explanation", ""))
+            opts = mcq.get("options", [])
+            if len(opts) < 4:
+                logger.warning("Poll send skipped: fewer than 4 options")
+                continue
             await context.bot.send_poll(
                 chat_id=chat_id,
                 question=q_text,
-                options=mcq["options"],
+                options=opts[:4],
                 type="quiz",
-                correct_option_id=mcq["answer_index"],
+                correct_option_id=mcq.get("answer_index", 0),
                 explanation=explanation or None,
                 is_anonymous=True,
             )
