@@ -1732,7 +1732,8 @@ async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 kb = []
                 for cid, cname in channels:
                     kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"pdfch_{cid}")])
-                kb.append([InlineKeyboardButton("📄 CSV File Only", callback_data="pdf_csv_only")])
+                kb.append([InlineKeyboardButton("📄 CSV Only", callback_data="pdf_csv_only")])
+                kb.append([InlineKeyboardButton("📑 PDF Only", callback_data="pdf_pdf_only")])
                 no_channel_note = "" if channels else "\n\n⚠️ কোনো চ্যানেল যোগ করা নেই — /channel দিয়ে যোগ করো, অথবা CSV Only বেছে নাও।"
                 await update.message.reply_text(
                     f"📋 <b>{file_name}</b>\n"
@@ -1770,53 +1771,22 @@ async def pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("pdfch_"):
         channel_id = data[len("pdfch_"):]
-        await process_pdf(update, context, channel_id, status_message=query.message)
+        status_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text="⏳ শুরু হচ্ছে...")
+        await process_pdf(update, context, channel_id, status_message=status_msg)
         return
 
     if data == "pdf_csv_only":
-        await process_pdf(update, context, None, csv_only=True, status_message=query.message)
+        status_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text="⏳ শুরু হচ্ছে...")
+        await process_pdf(update, context, None, csv_only=True, status_message=status_msg)
         return
 
-    if data == "pdf_csv_pdf":
-        mcqs = context.user_data.get("pdf_mcqs", [])
-        topic = context.user_data.get("pdf_topic", DEFAULT_TOPIC)
-        if not mcqs:
-            await query.edit_message_text("❌ ডেটা মেয়াদ উত্তীর্ণ।")
-            return
-
-        settings = db_get_settings(user_id)
-        watermark = settings.get("watermark") or ""
-
-        csv_bytes = generate_csv(mcqs)
-        csv_buffer = io.BytesIO(csv_bytes)
-        csv_buffer.name = f"MCQ_{topic.replace(' ', '_')}.csv"
-
-        pdf_bytes = generate_pdf(mcqs, topic, watermark)
-
-        await query.edit_message_text("📄 CSV + PDF তৈরি হচ্ছে...")
-
-        await context.bot.send_document(
-            chat_id=update.effective_chat.id,
-            document=csv_buffer,
-            filename=f"MCQ_{topic.replace(' ', '_')}.csv",
-            caption=f"📄 <b>{topic}</b> — MCQ CSV File\nমোট: {len(mcqs)}টি",
-            parse_mode=ParseMode.HTML
-        )
-
-        if pdf_bytes:
-            pdf_buffer = io.BytesIO(pdf_bytes)
-            pdf_buffer.name = f"MCQ_{topic.replace(' ', '_')}.pdf"
-            await context.bot.send_document(
-                chat_id=update.effective_chat.id,
-                document=pdf_buffer,
-                filename=f"MCQ_{topic.replace(' ', '_')}.pdf",
-                caption=f"📑 <b>{topic}</b> — MCQ PDF File\nমোট: {len(mcqs)}টি",
-                parse_mode=ParseMode.HTML
-            )
+    if data == "pdf_pdf_only":
+        status_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text="⏳ শুরু হচ্ছে...")
+        await process_pdf(update, context, None, pdf_only=True, status_message=status_msg)
         return
 
 
-async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_id, csv_only: bool = False, status_message=None):
+async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_id, csv_only: bool = False, status_message=None, pdf_only: bool = False):
     """
     100% ported from QuizBot's process_pdf_pages: live editing dashboard with
     per-page status + progress bar, poll send with 3x retry, first-poll-link
@@ -1919,7 +1889,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
                         return
                     continue
 
-                if csv_only:
+                if csv_only or pdf_only:
                     for m in mcqs:
                         opts = m.get("options", ["", "", "", ""])
                         # AI মাঝেমধ্যে option-এর শুরুতে "A) ", "ক. " ইত্যাদি prefix জুড়ে দেয় —
@@ -2002,7 +1972,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
                 page_status[idx]["done"] = True
                 await notify_owner(context, f"[PDF] Page {page_num} error:\n{e}")
 
-        if all_mcqs_csv:
+        if all_mcqs_csv and csv_only:
             csv_buf = io.StringIO()
             writer = csv.writer(csv_buf)
             writer.writerow(["questions", "option1", "option2", "option3", "option4",
@@ -2016,7 +1986,24 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
                 caption=f"📄 {topic} — {len(all_mcqs_csv)} MCQ"
             )
 
-        if not csv_only and summary_pages:
+        if all_mcqs_csv and pdf_only:
+            mcqs_for_pdf = [
+                {"question": r[0], "options": [r[1], r[2], r[3], r[4]],
+                 "answer_index": int(r[5]) - 1, "explanation": r[6]}
+                for r in all_mcqs_csv
+            ]
+            settings = db_get_settings(user_id)
+            watermark = settings.get("watermark") or ""
+            pdf_bytes = generate_pdf(mcqs_for_pdf, topic, watermark)
+            if pdf_bytes:
+                pdf_bio = io.BytesIO(pdf_bytes)
+                pdf_bio.name = f"{topic}_mcq.pdf"
+                await context.bot.send_document(
+                    chat_id=chat_id, document=pdf_bio, filename=f"{topic}_mcq.pdf",
+                    caption=f"📑 {topic} — {len(all_mcqs_csv)} MCQ"
+                )
+
+        if not csv_only and not pdf_only and summary_pages:
             total_mcq_sum = sum(p["mcq_count"] for p in summary_pages)
             summary = f"🟥Ronon Special Practice System\n🎯Topic: {topic}\n🚀Total MCQ: {total_mcq_sum}\n\n"
             for p in summary_pages:
