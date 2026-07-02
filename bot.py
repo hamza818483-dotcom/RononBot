@@ -1321,13 +1321,33 @@ async def exp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data == "exp_own":
             settings = db_get_settings(user_id)
+            is_on = bool(settings.get("own_explanation_on"))
             current_text = settings.get("own_explanation") or "(সেট করা নেই)"
-            kb = [
-                [InlineKeyboardButton("✏️ Edit/Set Own Explanation", callback_data="exp_own_edit")],
-            ]
+            kb = [[
+                InlineKeyboardButton(f"{'✅ ON' if is_on else '⬜ OFF'}", callback_data="exp_own_toggle"),
+                InlineKeyboardButton("✏️ Edit", callback_data="exp_own_edit"),
+            ]]
             await query.message.reply_text(
                 f"✍️ <b>Own Explanation</b>\n\nবর্তমান টেক্সট:\n<code>{current_text}</code>\n\n"
-                f"⚠️ Set করলেই এটা 100% সব poll-এর explanation হিসেবে বসবে (AI explanation override হবে)।",
+                f"Status: {'🟢 ON (সব poll-এ এটাই বসবে)' if is_on else '🔴 OFF (AI explanation থাকবে)'}\n"
+                f"⚠️ নতুন করে Edit/Set করলেই Auto ON হয়ে যাবে।",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
+
+        elif data == "exp_own_toggle":
+            settings = db_get_settings(user_id)
+            new_state = 0 if settings.get("own_explanation_on") else 1
+            db_update_settings(user_id, own_explanation_on=new_state)
+            current_text = settings.get("own_explanation") or "(সেট করা নেই)"
+            kb = [[
+                InlineKeyboardButton(f"{'✅ ON' if new_state else '⬜ OFF'}", callback_data="exp_own_toggle"),
+                InlineKeyboardButton("✏️ Edit", callback_data="exp_own_edit"),
+            ]]
+            await query.edit_message_text(
+                f"✍️ <b>Own Explanation</b>\n\nবর্তমান টেক্সট:\n<code>{current_text}</code>\n\n"
+                f"Status: {'🟢 ON (সব poll-এ এটাই বসবে)' if new_state else '🔴 OFF (AI explanation থাকবে)'}\n"
+                f"⚠️ নতুন করে Edit/Set করলেই Auto ON হয়ে যাবে।",
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup(kb)
             )
