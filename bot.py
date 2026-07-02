@@ -233,7 +233,8 @@ def db_add_key(key: str, added_by: int) -> tuple:
             if existing.data:
                 return False, "duplicate"
             sb.table("ronon_api_keys").insert({
-                "api_key": key, "active": 1, "used_today": 0, "usage_date": ""
+                "api_key": key, "active": 1, "used_today": 0, "usage_date": "",
+                "provider": "gemini"
             }).execute()
             return True, ""
         except Exception as e:
