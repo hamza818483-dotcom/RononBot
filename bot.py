@@ -1470,21 +1470,17 @@ async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await process_pdf(update, context, channel_id)
             else:
                 channels = db_list_channels()
-                if not channels:
-                    # No channels configured — process straight to CSV only, same as QuizBot's fallback
-                    await process_pdf(update, context, None, csv_only=True)
-                    return
-
                 kb = []
                 for cid, cname in channels:
                     kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"pdfch_{cid}")])
                 kb.append([InlineKeyboardButton("📄 CSV File Only", callback_data="pdf_csv_only")])
+                no_channel_note = "" if channels else "\n\n⚠️ কোনো চ্যানেল যোগ করা নেই — /channel দিয়ে যোগ করো, অথবা CSV Only বেছে নাও।"
                 await update.message.reply_text(
                     f"📋 <b>{doc.file_name}</b>\n"
                     f"🎯 Topic: <b>{topic}</b>\n"
                     f"📄 Page Range: <b>{page_range or 'All'}</b>\n"
                     f"🎯 Per Page MCQ: <b>{per_page_count or 'Highest Possible'}</b>\n\n"
-                    f"Channel select করো:",
+                    f"Channel select করো:{no_channel_note}",
                     parse_mode=ParseMode.HTML,
                     reply_markup=InlineKeyboardMarkup(kb)
                 )
@@ -1637,6 +1633,11 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
                 if error or not mcqs:
                     page_status[idx]["current"] = False
                     page_status[idx]["done"] = True
+                    if error and idx == 0:
+                        # Fatal setup error (e.g. no API key) — tell the user immediately instead of
+                        # silently skipping every remaining page with no feedback
+                        await status_message.edit_text(f"❌ {error}")
+                        return
                     continue
 
                 if csv_only:
