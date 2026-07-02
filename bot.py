@@ -351,6 +351,9 @@ MCQ_PROMPT_WITH_COUNT = """📝 Special MCQ TYPE: Standard Easy
 💥উত্তর: A/B/C/D — MUST be distributed across different options. STRICTLY FORBIDDEN: all answers being "A" or same option. Each MCQ's correct answer MUST be placed at a different position (A, B, C, or D) — vary them naturally across questions.
 💥ব্যাখ্যা: max 200 chars, source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)
 
+Topic: {topic}
+Page: {page}
+
 MUST Return ONLY valid JSON array, no markdown:
 [{{"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"..."}}]"""
 
@@ -383,19 +386,26 @@ MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 💥উত্তর: A/B/C/D — MUST be distributed across different options. STRICTLY FORBIDDEN: all answers being "A" or same option. Each MCQ's correct answer MUST be placed at a different position — vary them naturally so answers are spread across A, B, C, D positions.
 💥ব্যাখ্যা: max 200 chars, source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)
 
+Topic: {topic}
+Page: {page}
+
 MUST Return ONLY valid JSON array, no markdown:
 [{{"question":"...","options":["option1","option2","option3","option4"],"answer":"C","explanation":"..."}}]"""
 
 
-async def gemini_generate_mcq(image_bytes: bytes, mime_type: str = "image/jpeg", count: int = None) -> tuple:
+async def gemini_generate_mcq(image_bytes: bytes, mime_type: str = "image/jpeg", count: int = None,
+                               topic: str = None, page: int = None) -> tuple:
     keys = db_get_active_keys()
     if not keys:
         return [], "❌ কোনো Gemini API key যোগ করা নেই। /addkey দিয়ে key যোগ করুন।"
 
+    topic_str = topic or DEFAULT_TOPIC
+    page_str = str(page).zfill(2) if page else "01"
+
     if count:
-        prompt = MCQ_PROMPT_WITH_COUNT.format(count=count)
+        prompt = MCQ_PROMPT_WITH_COUNT.format(count=count, topic=topic_str, page=page_str)
     else:
-        prompt = MCQ_PROMPT_MAX
+        prompt = MCQ_PROMPT_MAX.format(topic=topic_str, page=page_str)
 
     last_err = None
     for key in keys:
@@ -457,12 +467,12 @@ def parse_mcq_json(text: str) -> list:
         try:
             if not isinstance(m, dict):
                 continue
-            if not all(k in m for k in ("question", "options", "answer")):
+            if not all(k in m for k in ("question", "options", "answer", "explanation")):
                 continue
             opts = m.get("options", [])
-            if not isinstance(opts, list) or len(opts) < 4:
+            if not isinstance(opts, list) or len(opts) != 4:
                 continue
-            opts = [str(o).strip() for o in opts[:4]]
+            opts = [str(o).strip() for o in opts]
             # Reject MCQs where an option leaked page/section navigation text
             # (e.g. "Card 1", "Section 2") instead of real factual content.
             if any(nav_label_re.match(o) for o in opts):
@@ -1162,7 +1172,7 @@ async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file = await context.bot.get_file(photo.file_id)
             img_bytes = bytes(await file.download_as_bytearray())
 
-            mcqs, error = await gemini_generate_mcq(img_bytes, "image/jpeg")
+            mcqs, error = await gemini_generate_mcq(img_bytes, "image/jpeg", topic=topic, page=1)
             if error or not mcqs:
                 await wait_msg.edit_text(error or "❌ কোনো MCQ বানানো যায়নি।")
                 return
@@ -1284,7 +1294,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(photo.file_id)
         img_bytes = bytes(await file.download_as_bytearray())
 
-        mcqs, error = await gemini_generate_mcq(img_bytes, "image/jpeg")
+        mcqs, error = await gemini_generate_mcq(img_bytes, "image/jpeg", page=1)
         if error or not mcqs:
             await wait_msg.edit_text(error or "❌ কোনো MCQ বানানো যায়নি।")
             return
@@ -1490,7 +1500,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
             await context.bot.send_photo(chat_id=channel_id, photo=buf, caption=f"📄 Page {page_num}")
 
             page_bytes = buf.getvalue()
-            mcqs, error = await gemini_generate_mcq(page_bytes, "image/jpeg", per_page)
+            mcqs, error = await gemini_generate_mcq(page_bytes, "image/jpeg", per_page, topic=topic, page=page_num)
             if error or not mcqs:
                 continue
 
@@ -1550,7 +1560,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             img.save(buf, format="JPEG")
             page_bytes = buf.getvalue()
 
-            mcqs, error = await gemini_generate_mcq(page_bytes, "image/jpeg")
+            mcqs, error = await gemini_generate_mcq(page_bytes, "image/jpeg", page=i)
             if error or not mcqs:
                 continue
             sent = await send_mcqs_as_polls(context, user_id, mcqs, update.effective_chat.id)
