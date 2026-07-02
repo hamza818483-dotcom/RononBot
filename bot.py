@@ -1307,61 +1307,67 @@ async def exp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = query.data
 
-    if data == "exp_tagname":
-        settings = db_get_settings(user_id)
-        existing_tags = db_get_exp_tags(user_id)
-        text = "🏷️ <b>Explanation Tag Name</b>\n\n"
-        if existing_tags:
-            text += "Saved tags:\n" + "\n".join(f"• {t}" for t in existing_tags) + "\n\n"
-        current = settings.get("current_exp_tag") or "(সেট করা নেই)"
-        text += f"বর্তমান: <b>{current}</b>\n\nনতুন tag লিখতে reply করুন।"
-        context.user_data["awaiting_exp_tag"] = True
-        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
+    try:
+        if data == "exp_tagname":
+            settings = db_get_settings(user_id)
+            existing_tags = db_get_exp_tags(user_id)
+            text = "🏷️ <b>Explanation Tag Name</b>\n\n"
+            if existing_tags:
+                text += "Saved tags:\n" + "\n".join(f"• {t}" for t in existing_tags) + "\n\n"
+            current = settings.get("current_exp_tag") or "(সেট করা নেই)"
+            text += f"বর্তমান: <b>{current}</b>\n\nনতুন tag লিখতে reply করুন।"
+            context.user_data["awaiting_exp_tag"] = True
+            await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
 
-    elif data == "exp_own":
-        settings = db_get_settings(user_id)
-        is_on = bool(settings.get("own_explanation_on"))
-        current_text = settings.get("own_explanation") or "(সেট করা নেই)"
-        kb = [
-            [InlineKeyboardButton(
-                f"{'✅ ON' if is_on else '⬜ OFF'} — Toggle",
-                callback_data="exp_own_toggle"
-            )],
-            [InlineKeyboardButton("✏️ Edit/Set Own Explanation", callback_data="exp_own_edit")],
-        ]
-        await query.message.reply_text(
-            f"✍️ <b>Own Explanation</b>\n\nবর্তমান টেক্সট:\n<code>{current_text}</code>\n\n"
-            f"Status: {'🟢 ON (সব poll-এ এটাই বসবে)' if is_on else '🔴 OFF'}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
+        elif data == "exp_own":
+            settings = db_get_settings(user_id)
+            is_on = bool(settings.get("own_explanation_on"))
+            current_text = settings.get("own_explanation") or "(সেট করা নেই)"
+            kb = [
+                [InlineKeyboardButton(
+                    f"{'✅ ON' if is_on else '⬜ OFF'} — Toggle",
+                    callback_data="exp_own_toggle"
+                )],
+                [InlineKeyboardButton("✏️ Edit/Set Own Explanation", callback_data="exp_own_edit")],
+            ]
+            await query.message.reply_text(
+                f"✍️ <b>Own Explanation</b>\n\nবর্তমান টেক্সট:\n<code>{current_text}</code>\n\n"
+                f"Status: {'🟢 ON (সব poll-এ এটাই বসবে)' if is_on else '🔴 OFF'}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
 
-    elif data == "exp_own_toggle":
-        settings = db_get_settings(user_id)
-        new_state = 0 if settings.get("own_explanation_on") else 1
-        db_update_settings(user_id, own_explanation_on=new_state)
-        await query.answer(f"Own Explanation {'ON' if new_state else 'OFF'} করা হয়েছে", show_alert=True)
-        kb = [
-            [InlineKeyboardButton(
-                f"{'✅ ON' if new_state else '⬜ OFF'} — Toggle",
-                callback_data="exp_own_toggle"
-            )],
-            [InlineKeyboardButton("✏️ Edit/Set Own Explanation", callback_data="exp_own_edit")],
-        ]
-        current_text = settings.get("own_explanation") or "(সেট করা নেই)"
-        await query.edit_message_text(
-            f"✍️ <b>Own Explanation</b>\n\nবর্তমান টেক্সট:\n<code>{current_text}</code>\n\n"
-            f"Status: {'🟢 ON (সব poll-এ এটাই বসবে)' if new_state else '🔴 OFF'}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
+        elif data == "exp_own_toggle":
+            settings = db_get_settings(user_id)
+            new_state = 0 if settings.get("own_explanation_on") else 1
+            db_update_settings(user_id, own_explanation_on=new_state)
+            kb = [
+                [InlineKeyboardButton(
+                    f"{'✅ ON' if new_state else '⬜ OFF'} — Toggle",
+                    callback_data="exp_own_toggle"
+                )],
+                [InlineKeyboardButton("✏️ Edit/Set Own Explanation", callback_data="exp_own_edit")],
+            ]
+            current_text = settings.get("own_explanation") or "(সেট করা নেই)"
+            await query.edit_message_text(
+                f"✍️ <b>Own Explanation</b>\n\nবর্তমান টেক্সট:\n<code>{current_text}</code>\n\n"
+                f"Status: {'🟢 ON (সব poll-এ এটাই বসবে)' if new_state else '🔴 OFF'}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
 
-    elif data == "exp_own_edit":
-        context.user_data["awaiting_own_exp"] = True
-        await query.message.reply_text(
-            "✏️ Own explanation-এর টেক্সট লিখে reply করুন:",
-            reply_markup=ForceReply(selective=True)
-        )
+        elif data == "exp_own_edit":
+            context.user_data["awaiting_own_exp"] = True
+            await query.message.reply_text(
+                "✏️ Own explanation-এর টেক্সট লিখে reply করুন:",
+                reply_markup=ForceReply(selective=True)
+            )
+    except Exception as e:
+        logger.error(f"exp_callback error: {e}", exc_info=True)
+        try:
+            await query.message.reply_text(f"❌ Error: {e}")
+        except Exception:
+            pass
 
 
 async def handle_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
