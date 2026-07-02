@@ -422,32 +422,39 @@ def db_add_tag(user_id: int, name: str):
 def db_get_settings(user_id: int) -> dict:
     defaults = {"user_id": user_id, "current_tag": "", "own_explanation": "",
                 "own_explanation_on": 0, "current_exp_tag": "", "watermark": ""}
-    if sb:
-        r = sb.table("ronon_user_settings").select("*").eq("user_id", user_id).execute()
-        if not r.data:
-            sb.table("ronon_user_settings").insert(defaults).execute()
-            return defaults
-        return r.data[0]
-    conn = db_conn()
-    row = conn.execute("SELECT * FROM user_settings WHERE user_id=?", (user_id,)).fetchone()
-    if not row:
-        conn.execute("INSERT INTO user_settings (user_id) VALUES (?)", (user_id,))
-        conn.commit()
+    try:
+        if sb:
+            r = sb.table("ronon_user_settings").select("*").eq("user_id", user_id).execute()
+            if not r.data:
+                sb.table("ronon_user_settings").insert(defaults).execute()
+                return defaults
+            return r.data[0]
+        conn = db_conn()
         row = conn.execute("SELECT * FROM user_settings WHERE user_id=?", (user_id,)).fetchone()
-    conn.close()
-    return dict(row)
+        if not row:
+            conn.execute("INSERT INTO user_settings (user_id) VALUES (?)", (user_id,))
+            conn.commit()
+            row = conn.execute("SELECT * FROM user_settings WHERE user_id=?", (user_id,)).fetchone()
+        conn.close()
+        return dict(row)
+    except Exception as e:
+        logger.error(f"[DB] get_settings error: {e}")
+        return defaults
 
 
 def db_update_settings(user_id: int, **fields):
-    db_get_settings(user_id)
-    if sb:
-        sb.table("ronon_user_settings").update(fields).eq("user_id", user_id).execute()
-        return
-    conn = db_conn()
-    keys = ", ".join(f"{k}=?" for k in fields)
-    conn.execute(f"UPDATE user_settings SET {keys} WHERE user_id=?", (*fields.values(), user_id))
-    conn.commit()
-    conn.close()
+    try:
+        db_get_settings(user_id)
+        if sb:
+            sb.table("ronon_user_settings").update(fields).eq("user_id", user_id).execute()
+            return
+        conn = db_conn()
+        keys = ", ".join(f"{k}=?" for k in fields)
+        conn.execute(f"UPDATE user_settings SET {keys} WHERE user_id=?", (*fields.values(), user_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"[DB] update_settings error: {e}")
 
 
 def db_add_exp_tag(user_id: int, name: str):
