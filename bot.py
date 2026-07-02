@@ -1409,6 +1409,74 @@ async def handle_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
+@require_permit
+async def cmd_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reply = update.message.reply_to_message
+    if not reply or not reply.document:
+        await update.message.reply_text("❌ CSV ফাইলে reply করে /sheet দাও!")
+        return
+    doc = reply.document
+    file_name = doc.file_name or ""
+    if not file_name.lower().endswith(".csv"):
+        await update.message.reply_text("❌ শুধু .csv file support করে!")
+        return
+
+    wait_msg = await update.message.reply_text("⏳ CSV পড়া হচ্ছে...")
+    try:
+        file = await context.bot.get_file(doc.file_id)
+        csv_bytes = bytes(await file.download_as_bytearray())
+        content = csv_bytes.decode("utf-8-sig")
+        reader = csv.DictReader(io.StringIO(content))
+        letter_map = {"1": 0, "2": 1, "3": 2, "4": 3, "A": 0, "B": 1, "C": 2, "D": 3}
+        mcqs = []
+        for row in reader:
+            q = row.get("question") or row.get("questions") or ""
+            if not q.strip():
+                continue
+            opts = [row.get(f"option{i}", "").strip() for i in range(1, 5)]
+            opts = [o for o in opts if o]
+            if len(opts) < 2:
+                continue
+            ans_raw = str(row.get("answer", "1")).strip().upper()
+            ans_idx = letter_map.get(ans_raw, 0)
+            mcqs.append({
+                "question": q.strip(),
+                "options": opts,
+                "answer_index": ans_idx,
+                "explanation": (row.get("explanation") or "").strip()
+            })
+
+        if not mcqs:
+            await wait_msg.edit_text("❌ CSV থেকে কোনো MCQ পাওয়া যায়নি! Format ঠিক আছে কিনা দেখো।")
+            return
+
+        await wait_msg.edit_text(f"✅ {len(mcqs)} টি MCQ পাওয়া গেছে!\n🎨 Sheet PDF বানানো হচ্ছে...")
+
+        user_id = update.effective_user.id
+        settings = db_get_settings(user_id)
+        watermark = settings.get("watermark") or ""
+        title = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
+        pdf_bytes = generate_pdf(mcqs, title, watermark)
+
+        if not pdf_bytes:
+            await wait_msg.edit_text("❌ PDF generate করতে সমস্যা হয়েছে!")
+            return
+
+        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", title)[:50] or "ATLAS_Sheet"
+        pdf_buffer = io.BytesIO(pdf_bytes)
+        pdf_buffer.name = f"{safe_title}_sheet.pdf"
+        await context.bot.send_document(
+            chat_id=update.effective_chat.id,
+            document=pdf_buffer,
+            filename=f"{safe_title}_sheet.pdf",
+            caption=f"📖 Practice Sheet\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP"
+        )
+        await wait_msg.delete()
+    except Exception as e:
+        logger.error(f"cmd_sheet error: {e}", exc_info=True)
+        await wait_msg.edit_text(f"❌ Error: {e}")
+
+
 # ============================================================
 # /img — Reply-based (new) + Old awaiting mode
 # ============================================================
@@ -2158,6 +2226,7 @@ def main():
     ptb_app.add_handler(CommandHandler("channellist", cmd_channellist))
     ptb_app.add_handler(CommandHandler("removechannel", cmd_removechannel))
     ptb_app.add_handler(CommandHandler("tag", cmd_tagq))
+    ptb_app.add_handler(CommandHandler("sheet", cmd_sheet))
     ptb_app.add_handler(CommandHandler("exp", cmd_exp))
     ptb_app.add_handler(CommandHandler("img", cmd_img))
     ptb_app.add_handler(CommandHandler("pdf", cmd_pdf))
