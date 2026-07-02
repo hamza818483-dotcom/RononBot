@@ -1,7 +1,7 @@
 """
 Ronon Bot — Telegram MCQ Bot
 Owner-managed access, Gemini-powered /img /pdf MCQ poll generator,
-per-poll tags + explanations.
+per-poll tags + explanations. Webhook mode for Render.
 """
 import os
 import re
@@ -11,12 +11,16 @@ import logging
 import asyncio
 import base64
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from io import BytesIO
+import csv
+import io
+import time
 from datetime import datetime, timedelta
+from io import BytesIO
 
+import aiohttp
+from aiohttp import web
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, BotCommand
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -31,13 +35,16 @@ logging.basicConfig(
 logger = logging.getLogger("RononBot")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-OWNER_ID = 7411044846  # backward-compat (primary owner)
-OWNER_IDS = {7411044846, 5341425626}  # multi-owner support — সব owner id এখানে থাকবে
+OWNER_ID = 7411044846
+OWNER_IDS = {7411044846, 5341425626}
 DB_PATH = os.environ.get("DB_PATH", "ronon.db")
-DAILY_KEY_LIMIT = 20  # প্রতিটা Gemini key-এর daily request quota
+DAILY_KEY_LIMIT = 20
+RENDER_URL = "https://rononbot.onrender.com"
+ERROR_NOTIFY_USER = 5341425626
+DEFAULT_TOPIC = "Special MCQ By Ronon"
 
 # ============================================================
-# DATABASE
+# DATABASE (unchanged)
 # ============================================================
 
 def db_conn():
@@ -68,7 +75,6 @@ def db_init():
         added_by INTEGER,
         added_at TEXT
     )""")
-    # migrate: add usage columns if upgrading from an older DB
     try:
         c.execute("ALTER TABLE api_keys ADD COLUMN used_today INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
@@ -137,8 +143,6 @@ def db_list_permitted():
     return [r["user_id"] for r in rows]
 
 
-# ---- API keys ----
-
 def db_add_key(key: str, added_by: int) -> bool:
     conn = db_conn()
     try:
@@ -168,7 +172,6 @@ def _today_utc_str() -> str:
 
 
 def db_get_all_keys():
-    """Returns all keys with today's usage (auto-resets if usage_date is stale)."""
     conn = db_conn()
     rows = conn.execute(
         "SELECT id, api_key, active, used_today, usage_date FROM api_keys ORDER BY id"
@@ -188,7 +191,6 @@ def db_get_all_keys():
 
 
 def db_increment_key_usage(key: str):
-    """Call this every time a key is actually used for a Gemini request."""
     conn = db_conn()
     today = _today_utc_str()
     row = conn.execute(
@@ -219,8 +221,6 @@ def db_key_usage_today(key: str) -> int:
         return 0
     return row["used_today"] if row["usage_date"] == _today_utc_str() else 0
 
-
-# ---- Channels ----
 
 def db_add_channel(channel_id: str, channel_name: str, added_by: int) -> bool:
     conn = db_conn()
@@ -260,8 +260,6 @@ def db_remove_channel(channel_id: str) -> bool:
     return changed
 
 
-# ---- Tags ----
-
 def db_add_tag(user_id: int, name: str):
     conn = db_conn()
     conn.execute(
@@ -290,7 +288,7 @@ def db_get_settings(user_id: int) -> dict:
 
 
 def db_update_settings(user_id: int, **fields):
-    db_get_settings(user_id)  # ensure row exists
+    db_get_settings(user_id)
     conn = db_conn()
     keys = ", ".join(f"{k}=?" for k in fields)
     conn.execute(
@@ -324,9 +322,11 @@ def db_get_exp_tags(user_id: int):
 # GEMINI MCQ GENERATION
 # ============================================================
 
-MCQ_PROMPT = """তুমি একজন expert MCQ generator। এই ইমেজ/PDF page থেকে যত সম্ভব ভালো মানের MCQ (Multiple Choice Question) বানাও।
+MCQ_PROMPT_TEMPLATE = """তুমি একজন expert MCQ generator। এই ইমেজ/PDF page থেকে {count_hint} MCQ (Multiple Choice Question) বানাও।
 
 নিয়ম:
+- যদি ছবিতে আগে থেকে MCQ থাকে, সেগুলোও extract করে সঠিক format-এ দাও
+- পাশাপাশি content থেকে নতুন MCQ তৈরি করো
 - প্রতিটা MCQ-তে 4টি option (A,B,C,D) থাকবে
 - Answer অবশ্যই সঠিক হতে হবে
 - ছোট explanation দিবে (1-2 লাইন)
@@ -337,16 +337,22 @@ Return ONLY valid JSON array, no markdown, no extra text:
 """
 
 
-async def gemini_generate_mcq(image_bytes: bytes, mime_type: str = "image/jpeg") -> tuple:
-    """Try all saved Gemini keys in order. Returns (mcqs, error)."""
+async def gemini_generate_mcq(image_bytes: bytes, mime_type: str = "image/jpeg", count: int = None) -> tuple:
     keys = db_get_active_keys()
     if not keys:
         return [], "❌ কোনো Gemini API key যোগ করা নেই। /addkey দিয়ে key যোগ করুন।"
 
+    if count:
+        count_hint = f"সঠিকভাবে {count} টি"
+    else:
+        count_hint = "যত সম্ভব ভালো মানের (সর্বোচ্চ সংখ্যক)"
+
+    prompt = MCQ_PROMPT_TEMPLATE.format(count_hint=count_hint)
+
     last_err = None
     for key in keys:
         if db_key_usage_today(key) >= DAILY_KEY_LIMIT:
-            continue  # এই key-এর আজকের quota শেষ, পরের key ট্রাই করো
+            continue
         try:
             from google import genai
             from google.genai import types
@@ -356,7 +362,7 @@ async def gemini_generate_mcq(image_bytes: bytes, mime_type: str = "image/jpeg")
                 return client.models.generate_content(
                     model="gemini-2.5-flash",
                     contents=[
-                        types.Part.from_text(text=MCQ_PROMPT),
+                        types.Part.from_text(text=prompt),
                         types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
                     ]
                 )
@@ -423,7 +429,97 @@ def parse_mcq_json(text: str) -> list:
 
 
 # ============================================================
-# ACCESS CONTROL DECORATOR
+# UTILITIES
+# ============================================================
+
+def build_final_explanation(user_id: int, mcq_explanation: str) -> str:
+    settings = db_get_settings(user_id)
+    parts = []
+    if settings.get("own_explanation_on") and settings.get("own_explanation"):
+        parts.append(settings["own_explanation"])
+    elif mcq_explanation:
+        parts.append(mcq_explanation)
+    exp_tag = settings.get("current_exp_tag")
+    if exp_tag:
+        parts.append(exp_tag)
+    return "\n".join(p for p in parts if p).strip()[:200]
+
+
+def build_question_text(user_id: int, question: str) -> str:
+    settings = db_get_settings(user_id)
+    tag = settings.get("current_tag")
+    if tag:
+        return f"{tag}\n{question}"[:290]
+    return question[:290]
+
+
+def generate_csv(mcqs: list) -> bytes:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["question", "option1", "option2", "option3", "option4", "option5", "answer", "explanation", "type", "section"])
+    for m in mcqs:
+        opts = m["options"][:4] + [""] * (5 - len(m["options"]))
+        ans = m["answer_index"] + 1
+        writer.writerow([
+            m["question"],
+            opts[0], opts[1], opts[2], opts[3], opts[4],
+            ans,
+            m.get("explanation", ""),
+            1,
+            1,
+        ])
+    return output.getvalue().encode('utf-8-sig')
+
+
+def parse_page_range(range_str: str, total_pages: int) -> list:
+    if not range_str:
+        return list(range(1, total_pages + 1))
+    pages = set()
+    for part in range_str.split(","):
+        part = part.strip()
+        if "-" in part:
+            try:
+                start, end = part.split("-")
+                start, end = int(start), int(end)
+                for p in range(start, end + 1):
+                    if 1 <= p <= total_pages:
+                        pages.add(p)
+            except ValueError:
+                continue
+        else:
+            try:
+                p = int(part)
+                if 1 <= p <= total_pages:
+                    pages.add(p)
+            except ValueError:
+                continue
+    return sorted(pages) if pages else list(range(1, total_pages + 1))
+
+
+async def send_mcqs_as_polls(context: ContextTypes.DEFAULT_TYPE, user_id: int, mcqs: list, chat_id: int) -> int:
+    sent = 0
+    for mcq in mcqs:
+        try:
+            q_text = build_question_text(user_id, mcq["question"])
+            explanation = build_final_explanation(user_id, mcq.get("explanation", ""))
+            await context.bot.send_poll(
+                chat_id=chat_id,
+                question=q_text,
+                options=mcq["options"],
+                type="quiz",
+                correct_option_id=mcq["answer_index"],
+                explanation=explanation or None,
+                is_anonymous=True,
+            )
+            sent += 1
+            await asyncio.sleep(0.4)
+        except Exception as e:
+            logger.warning(f"Poll send failed: {e}")
+    return sent
+
+
+# ============================================================
+# ACCESS CONTROL
 # ============================================================
 
 def require_permit(func):
@@ -448,13 +544,30 @@ def owner_only(func):
 
 
 # ============================================================
-# /start
+# ERROR HANDLER
 # ============================================================
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Exception while handling an update:", exc_info=context.error)
+    try:
+        error_text = f"❌ <b>Bot Error:</b>\n<code>{str(context.error)}</code>\n\nUpdate: {update}"
+        await context.bot.send_message(chat_id=ERROR_NOTIFY_USER, text=error_text[:4096], parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+
+
+# ============================================================
+# COMMANDS
+# ============================================================
+
+async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🏓 Pong! Bot is online.")
+
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     name = user.first_name or "বন্ধু"
-    text = f"Welcome to Ronon Bot!প্রিয় {name}..😄\n\n"
+    text = f"Welcome to Ronon Bot! প্রিয় {name}..😄\n\n"
 
     if user.id in OWNER_IDS:
         text += (
@@ -468,24 +581,22 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/removechannel (id) — চ্যানেল সরান\n"
             "/tagQ (name) — প্রশ্নের ট্যাগ সেট করুন\n"
             "/exp — Explanation settings\n"
-            "/img — ছবি থেকে MCQ বানান\n"
-            "/pdf — PDF থেকে MCQ বানান\n"
+            "/img — ছবিতে reply করে MCQ বানান\n"
+            "/pdf — PDF-এ reply করে MCQ বানান\n"
+            "/ping — Bot status চেক করুন\n"
         )
     else:
         text += (
             "📋 <b>Available Commands:</b>\n"
             "/tagQ (name) — প্রশ্নের ট্যাগ সেট করুন\n"
             "/exp — Explanation settings\n"
-            "/img — ছবি থেকে MCQ বানান\n"
-            "/pdf — PDF থেকে MCQ বানান\n"
+            "/img — ছবিতে reply করে MCQ বানান\n"
+            "/pdf — PDF-এ reply করে MCQ বানান\n"
+            "/ping — Bot status চেক করুন\n"
         )
 
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
-
-# ============================================================
-# /permit /remove — Owner only
-# ============================================================
 
 @owner_only
 async def cmd_permit(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -517,10 +628,6 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ এই user permitted list-এ নেই।")
 
-
-# ============================================================
-# /addkey — Owner only
-# ============================================================
 
 @owner_only
 async def cmd_addkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -583,10 +690,6 @@ async def cmd_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
-# ============================================================
-# /channel /channellist — Owner only, interactive button UI
-# ============================================================
-
 @owner_only
 async def cmd_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
@@ -608,7 +711,6 @@ async def cmd_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _build_channellist_view():
-    """Builds (text, keyboard) for the channel list screen."""
     channels = db_list_channels()
     if not channels:
         text = "📍 <b>কোনো চ্যানেল যোগ করা নেই।</b>"
@@ -646,7 +748,6 @@ async def cmd_removechannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the inline buttons on /channellist: delete + add."""
     query = update.callback_query
     if query.from_user.id not in OWNER_IDS:
         await query.answer("❌ শুধু Owner ব্যবহার করতে পারবে।", show_alert=True)
@@ -672,10 +773,6 @@ async def channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-# ============================================================
-# /tagQ — set question tag
-# ============================================================
-
 @require_permit
 async def cmd_tagq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -690,10 +787,6 @@ async def cmd_tagq(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML
     )
 
-
-# ============================================================
-# /exp — explanation settings menu
-# ============================================================
 
 @require_permit
 async def cmd_exp(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -772,7 +865,6 @@ async def exp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Catches ForceReply responses for exp tag / own explanation setup."""
     user_id = update.effective_user.id
     text = update.message.text or ""
 
@@ -816,81 +908,24 @@ async def handle_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# /img /pdf — generate MCQ and send as polls (no extra buttons)
+# /img — Reply-based with Channel List + CSV Option
 # ============================================================
-
-def build_final_explanation(user_id: int, mcq_explanation: str) -> str:
-    """Applies tag/own-explanation settings to a single MCQ's explanation."""
-    settings = db_get_settings(user_id)
-    parts = []
-
-    if settings.get("own_explanation_on") and settings.get("own_explanation"):
-        parts.append(settings["own_explanation"])
-    elif mcq_explanation:
-        parts.append(mcq_explanation)
-
-    exp_tag = settings.get("current_exp_tag")
-    if exp_tag:
-        parts.append(exp_tag)
-
-    return "\n".join(p for p in parts if p).strip()[:200]  # Telegram poll explanation limit
-
-
-def build_question_text(user_id: int, question: str) -> str:
-    settings = db_get_settings(user_id)
-    tag = settings.get("current_tag")
-    if tag:
-        return f"{tag}\n{question}"[:290]  # Telegram poll question limit ~300
-    return question[:290]
-
-
-async def send_mcqs_as_polls(update: Update, context: ContextTypes.DEFAULT_TYPE, mcqs: list):
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    sent = 0
-    for mcq in mcqs:
-        try:
-            q_text = build_question_text(user_id, mcq["question"])
-            explanation = build_final_explanation(user_id, mcq.get("explanation", ""))
-            await context.bot.send_poll(
-                chat_id=chat_id,
-                question=q_text,
-                options=mcq["options"],
-                type="quiz",
-                correct_option_id=mcq["answer_index"],
-                explanation=explanation or None,
-                is_anonymous=True,
-            )
-            sent += 1
-            await asyncio.sleep(0.4)
-        except Exception as e:
-            logger.warning(f"Poll send failed: {e}")
-    return sent
-
 
 @require_permit
 async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["awaiting_img"] = True
-    await update.message.reply_text("📷 এখন একটা ছবি পাঠান — তা থেকে MCQ poll বানানো হবে।")
-
-
-@require_permit
-async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["awaiting_pdf"] = True
-    await update.message.reply_text("📄 এখন একটা PDF ফাইল পাঠান — তা থেকে MCQ poll বানানো হবে।")
-
-
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_permitted(user_id):
+    if not update.message.reply_to_message or not update.message.reply_to_message.photo:
+        await update.message.reply_text(
+            "📷 একটা ছবিতে reply করে /img (Topic Name) লিখুন।\n"
+            "উদাহরণ: <code>/img Biology Chapter 1</code>",
+            parse_mode=ParseMode.HTML
+        )
         return
-    if not context.user_data.get("awaiting_img"):
-        return
-    context.user_data["awaiting_img"] = False
 
-    wait_msg = await update.message.reply_text("⏳ MCQ বানানো হচ্ছে...")
+    topic = " ".join(context.args).strip() if context.args else DEFAULT_TOPIC
+    photo = update.message.reply_to_message.photo[-1]
+
+    wait_msg = await update.message.reply_text("⏳ ছবি থেকে MCQ generate হচ্ছে...")
     try:
-        photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         img_bytes = bytes(await file.download_as_bytearray())
 
@@ -899,113 +934,359 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await wait_msg.edit_text(error or "❌ কোনো MCQ বানানো যায়নি।")
             return
 
+        context.user_data["img_mcqs"] = mcqs
+        context.user_data["img_topic"] = topic
+        context.user_data["img_user_id"] = update.effective_user.id
+
         await wait_msg.delete()
-        sent = await send_mcqs_as_polls(update, context, mcqs)
-        await update.message.reply_text(f"✅ {sent}টি MCQ poll পাঠানো হয়েছে!")
+
+        channels = db_list_channels()
+        kb = []
+        for cid, cname in channels:
+            kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"imgch_{cid}")])
+        kb.append([InlineKeyboardButton("📄 CSV File Only", callback_data="img_csv")])
+
+        await update.message.reply_text(
+            f"✅ <b>{len(mcqs)}</b>টি MCQ তৈরি হয়েছে!\n"
+            f"🎯 Topic: <b>{topic}</b>\n\n"
+            f"কোথায় পাঠাবেন?",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
     except Exception as e:
-        logger.error(f"handle_photo error: {e}", exc_info=True)
+        logger.error(f"cmd_img error: {e}", exc_info=True)
         await wait_msg.edit_text(f"❌ Error: {e}")
 
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
     user_id = update.effective_user.id
+
     if not is_permitted(user_id):
+        await query.answer("❌ অনুমতি নেই।", show_alert=True)
         return
-    if not context.user_data.get("awaiting_pdf"):
-        return
-    context.user_data["awaiting_pdf"] = False
 
-    doc = update.message.document
+    mcqs = context.user_data.get("img_mcqs", [])
+    topic = context.user_data.get("img_topic", DEFAULT_TOPIC)
+
+    if not mcqs:
+        await query.edit_message_text("❌ ডেটা মেয়াদ উত্তীর্ণ। আবার চেষ্টা করুন।")
+        return
+
+    if data == "img_csv":
+        csv_bytes = generate_csv(mcqs)
+        csv_buffer = io.BytesIO(csv_bytes)
+        csv_buffer.name = f"MCQ_{topic.replace(' ', '_')}.csv"
+        await query.edit_message_text("📄 CSV ফাইল তৈরি হচ্ছে...")
+        await context.bot.send_document(
+            chat_id=update.effective_chat.id,
+            document=csv_buffer,
+            filename=f"MCQ_{topic.replace(' ', '_')}.csv",
+            caption=f"📄 <b>{topic}</b> — MCQ CSV File\nমোট: {len(mcqs)}টি",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    if data.startswith("imgch_"):
+        channel_id = data[len("imgch_"):]
+
+        pre_text = f"🎯 <b>{topic}</b>\n📊 MCQ Polls Starting...\nমোট প্রশ্ন: {len(mcqs)}"
+        try:
+            await context.bot.send_message(chat_id=channel_id, text=pre_text, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            await query.edit_message_text(f"❌ চ্যানেলে পাঠাতে ব্যর্থ: {e}")
+            return
+
+        await query.edit_message_text(f"⏳ 📢 চ্যানেলে {len(mcqs)}টি poll পাঠানো হচ্ছে...")
+
+        sent = await send_mcqs_as_polls(context, user_id, mcqs, channel_id)
+
+        end_text = f"✅ MCQ Polls Completed!\n📊 Total: {sent} polls\n🏷️ Topic: {topic}"
+        await context.bot.send_message(chat_id=channel_id, text=end_text, parse_mode=ParseMode.HTML)
+
+        await query.edit_message_text(f"✅ {sent}টি poll চ্যানেলে পাঠানো হয়েছে!")
+        return
+
+
+# ============================================================
+# /pdf — Reply-based with args parsing
+# ============================================================
+
+@require_permit
+async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message or not update.message.reply_to_message.document:
+        await update.message.reply_text(
+            "📄 একটা PDF-এ reply করে /pdf command দিন।\n"
+            "Format: <code>/pdf -p 1-5 -c @channel -m \"Topic\" [10]</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    doc = update.message.reply_to_message.document
     if not doc.file_name.lower().endswith(".pdf"):
-        await update.message.reply_text("❌ শুধু PDF ফাইল পাঠান।")
+        await update.message.reply_text("❌ শুধু PDF ফাইলে reply করুন।")
         return
 
-    wait_msg = await update.message.reply_text("⏳ PDF processing হচ্ছে...")
+    text = update.message.text or ""
+    args = context.args
+
+    page_range = None
+    channel_id = None
+    topic = DEFAULT_TOPIC
+    per_page_count = None
+
+    i = 0
+    while i < len(args):
+        if args[i] == "-p" and i + 1 < len(args):
+            page_range = args[i + 1]
+            i += 2
+        elif args[i] == "-c" and i + 1 < len(args):
+            channel_id = args[i + 1]
+            i += 2
+        elif args[i] == "-m" and i + 1 < len(args):
+            topic = args[i + 1].strip('"\'')
+            i += 2
+        elif args[i] == "-t" and i + 1 < len(args):
+            i += 2
+        else:
+            i += 1
+
+    bracket_match = re.search(r'\[(\d+)\]', text)
+    if bracket_match:
+        per_page_count = int(bracket_match.group(1))
+
+    context.user_data["pdf_doc"] = doc
+    context.user_data["pdf_topic"] = topic
+    context.user_data["pdf_page_range"] = page_range
+    context.user_data["pdf_per_page"] = per_page_count
+    context.user_data["pdf_user_id"] = update.effective_user.id
+
+    if channel_id:
+        await process_pdf(update, context, channel_id)
+    else:
+        channels = db_list_channels()
+        if not channels:
+            await update.message.reply_text("❌ কোনো চ্যানেল যোগ করা নেই। /channel দিয়ে যোগ করুন।")
+            return
+
+        kb = []
+        for cid, cname in channels:
+            kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"pdfch_{cid}")])
+        await update.message.reply_text(
+            f"📄 PDF: <b>{doc.file_name}</b>\n"
+            f"🎯 Topic: <b>{topic}</b>\n"
+            f"📄 Page Range: <b>{page_range or 'All'}</b>\n"
+            f"🎯 Per Page MCQ: <b>{per_page_count or 'Highest Possible'}</b>\n\n"
+            f"কোথায় পাঠাবেন?",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+
+
+async def pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    user_id = update.effective_user.id
+
+    if not is_permitted(user_id):
+        await query.answer("❌ অনুমতি নেই।", show_alert=True)
+        return
+
+    if data.startswith("pdfch_"):
+        channel_id = data[len("pdfch_"):]
+        await process_pdf(update, context, channel_id, status_message=query.message)
+
+
+async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_id: str, status_message=None):
+    doc = context.user_data.get("pdf_doc")
+    topic = context.user_data.get("pdf_topic", DEFAULT_TOPIC)
+    page_range = context.user_data.get("pdf_page_range")
+    per_page = context.user_data.get("pdf_per_page")
+    user_id = context.user_data.get("pdf_user_id", update.effective_user.id)
+
+    if not doc:
+        text = "❌ ডেটা মেয়াদ উত্তীর্ণ।"
+        if status_message:
+            await status_message.edit_text(text)
+        else:
+            await update.message.reply_text(text)
+        return
+
+    if not status_message:
+        status_message = await update.message.reply_text("⏳ PDF processing হচ্ছে...")
+
     try:
         file = await context.bot.get_file(doc.file_id)
         pdf_bytes = bytes(await file.download_as_bytearray())
 
-        from pdf2image import convert_from_bytes
-        images = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=150)
+        from pdf2image import convert_from_bytes, pdfinfo_from_bytes
+
+        pdf_info = await asyncio.to_thread(pdfinfo_from_bytes, pdf_bytes)
+        total_pages = int(pdf_info["Pages"])
+
+        pages_to_process = parse_page_range(page_range, total_pages)
+
+        if not pages_to_process:
+            await status_message.edit_text("❌ কোনো পেজ সিলেক্ট করা যায়নি।")
+            return
+
+        min_page = min(pages_to_process)
+        max_page = max(pages_to_process)
+
+        images = await asyncio.to_thread(
+            convert_from_bytes, pdf_bytes, dpi=150,
+            first_page=min_page, last_page=max_page
+        )
+
+        page_images = {}
+        for idx, img in enumerate(images):
+            actual_page = min_page + idx
+            if actual_page in pages_to_process:
+                page_images[actual_page] = img
+
+        pre_text = (f"🎯 <b>{topic}</b>\n📄 PDF MCQ Polls Starting...\n"
+                    f"📄 Pages: {', '.join(str(p) for p in pages_to_process)}\n"
+                    f"মোট পেজ: {len(page_images)}")
+        await context.bot.send_message(chat_id=channel_id, text=pre_text, parse_mode=ParseMode.HTML)
 
         total_sent = 0
-        for i, img in enumerate(images, 1):
-            await wait_msg.edit_text(f"⏳ Page {i}/{len(images)} প্রসেস হচ্ছে...")
+        total_mcqs = 0
+
+        for page_num in sorted(page_images.keys()):
+            img = page_images[page_num]
+
             buf = BytesIO()
             img.save(buf, format="JPEG")
-            page_bytes = buf.getvalue()
+            buf.seek(0)
+            await context.bot.send_photo(chat_id=channel_id, photo=buf, caption=f"📄 Page {page_num}")
 
-            mcqs, error = await gemini_generate_mcq(page_bytes, "image/jpeg")
+            page_bytes = buf.getvalue()
+            mcqs, error = await gemini_generate_mcq(page_bytes, "image/jpeg", per_page)
             if error or not mcqs:
                 continue
-            sent = await send_mcqs_as_polls(update, context, mcqs)
+
+            total_mcqs += len(mcqs)
+            sent = await send_mcqs_as_polls(context, user_id, mcqs, channel_id)
             total_sent += sent
 
-        await wait_msg.delete()
-        await update.message.reply_text(f"✅ সর্বমোট {total_sent}টি MCQ poll পাঠানো হয়েছে!")
+            await status_message.edit_text(f"⏳ Page {page_num} complete... Total polls: {total_sent}")
+
+        end_text = f"✅ PDF MCQ Polls Completed!\n📊 Total Polls: {total_sent}\n🏷️ Topic: {topic}"
+        await context.bot.send_message(chat_id=channel_id, text=end_text, parse_mode=ParseMode.HTML)
+
+        await status_message.edit_text(
+            f"✅ সর্বমোট {total_sent}টি MCQ poll চ্যানেলে পাঠানো হয়েছে!\n"
+            f"📄 {len(page_images)}টি পেজ প্রসেস করা হয়েছে।"
+        )
+
     except Exception as e:
-        logger.error(f"handle_document error: {e}", exc_info=True)
-        await wait_msg.edit_text(f"❌ Error: {e}")
+        logger.error(f"process_pdf error: {e}", exc_info=True)
+        await status_message.edit_text(f"❌ Error: {e}")
 
 
 # ============================================================
-# HEALTH SERVER — Render Web Service requires a bound $PORT.
-# Bot runs in polling mode (no HTTP server otherwise), so Render would
-# mark the service unhealthy/sleep it. This minimal server fixes that.
+# MAIN — Webhook Mode
 # ============================================================
-class _HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"OK")
 
-    def log_message(self, format, *args):
-        pass  # silence default access logs
+async def keep_alive():
+    """Internal cron to keep Render service awake."""
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{RENDER_URL}/health", timeout=10) as resp:
+                    pass
+        except Exception:
+            pass
+        await asyncio.sleep(300)
 
-
-def start_health_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
-    logger.info(f"🩺 Health server listening on 0.0.0.0:{port}")
-    server.serve_forever()
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def main():
+    global ptb_app
     if not BOT_TOKEN:
         raise SystemExit("❌ BOT_TOKEN environment variable সেট করা নেই।")
 
     db_init()
 
-    threading.Thread(target=start_health_server, daemon=True).start()
+    ptb_app = Application.builder().token(BOT_TOKEN).build()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Handlers
+    ptb_app.add_handler(CommandHandler("start", cmd_start))
+    ptb_app.add_handler(CommandHandler("permit", cmd_permit))
+    ptb_app.add_handler(CommandHandler("remove", cmd_remove))
+    ptb_app.add_handler(CommandHandler("addkey", cmd_addkey))
+    ptb_app.add_handler(CommandHandler("keys", cmd_keys))
+    ptb_app.add_handler(CommandHandler("channel", cmd_channel))
+    ptb_app.add_handler(CommandHandler("channellist", cmd_channellist))
+    ptb_app.add_handler(CommandHandler("removechannel", cmd_removechannel))
+    ptb_app.add_handler(CommandHandler("tagQ", cmd_tagq))
+    ptb_app.add_handler(CommandHandler("exp", cmd_exp))
+    ptb_app.add_handler(CommandHandler("img", cmd_img))
+    ptb_app.add_handler(CommandHandler("pdf", cmd_pdf))
+    ptb_app.add_handler(CommandHandler("ping", cmd_ping))
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("permit", cmd_permit))
-    app.add_handler(CommandHandler("remove", cmd_remove))
-    app.add_handler(CommandHandler("addkey", cmd_addkey))
-    app.add_handler(CommandHandler("keys", cmd_keys))
-    app.add_handler(CommandHandler("channel", cmd_channel))
-    app.add_handler(CommandHandler("channellist", cmd_channellist))
-    app.add_handler(CommandHandler("removechannel", cmd_removechannel))
-    app.add_handler(CommandHandler("tagQ", cmd_tagq))
-    app.add_handler(CommandHandler("exp", cmd_exp))
-    app.add_handler(CommandHandler("img", cmd_img))
-    app.add_handler(CommandHandler("pdf", cmd_pdf))
+    ptb_app.add_handler(CallbackQueryHandler(exp_callback, pattern="^exp_"))
+    ptb_app.add_handler(CallbackQueryHandler(channel_callback, pattern="^(chdel_|chadd)"))
+    ptb_app.add_handler(CallbackQueryHandler(img_callback, pattern="^img_"))
+    ptb_app.add_handler(CallbackQueryHandler(pdf_callback, pattern="^pdfch_"))
+    ptb_app.add_handler(MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, handle_reply_text))
 
-    app.add_handler(CallbackQueryHandler(exp_callback, pattern="^exp_"))
-    app.add_handler(CallbackQueryHandler(channel_callback, pattern="^(chdel_|chadd)"))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
-    app.add_handler(MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, handle_reply_text))
+    ptb_app.add_error_handler(error_handler)
 
-    logger.info("🚀 Ronon Bot starting (polling mode)...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Webhook + Health server
+    async def health_handler(request):
+        return web.Response(text="OK")
+
+    async def webhook_handler(request):
+        try:
+            data = await request.json()
+            update = Update.de_json(data, ptb_app.bot)
+            await ptb_app.process_update(update)
+            return web.Response(text="OK")
+        except Exception as e:
+            logger.error(f"Webhook error: {e}")
+            return web.Response(text="Error", status=500)
+
+    async def on_startup(aio_app):
+        await ptb_app.initialize()
+        await ptb_app.start()
+        await ptb_app.bot.set_webhook(url=f"{RENDER_URL}/webhook")
+
+        commands = [
+            BotCommand("start", "Start the bot"),
+            BotCommand("permit", "Permit a user (Owner only)"),
+            BotCommand("remove", "Remove a user (Owner only)"),
+            BotCommand("addkey", "Add Gemini API key (Owner only)"),
+            BotCommand("keys", "Check API key status (Owner only)"),
+            BotCommand("channel", "Add a channel (Owner only)"),
+            BotCommand("channellist", "List channels (Owner only)"),
+            BotCommand("removechannel", "Remove a channel (Owner only)"),
+            BotCommand("tagQ", "Set question tag"),
+            BotCommand("exp", "Explanation settings"),
+            BotCommand("img", "Generate MCQ from image reply"),
+            BotCommand("pdf", "Generate MCQ from PDF reply"),
+            BotCommand("ping", "Check bot status"),
+        ]
+        await ptb_app.bot.set_my_commands(commands)
+
+        asyncio.create_task(keep_alive())
+        logger.info("🚀 Ronon Bot started in webhook mode")
+
+    async def on_shutdown(aio_app):
+        await ptb_app.stop()
+        await ptb_app.shutdown()
+
+    web_app = web.Application()
+    web_app.router.add_get('/health', health_handler)
+    web_app.router.add_post('/webhook', webhook_handler)
+    web_app.on_startup.append(on_startup)
+    web_app.on_shutdown.append(on_shutdown)
+
+    port = int(os.environ.get("PORT", 10000))
+    logger.info(f"🩺 Webhook server listening on 0.0.0.0:{port}")
+    web.run_app(web_app, host='0.0.0.0', port=port)
 
 
 if __name__ == "__main__":
