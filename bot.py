@@ -1015,11 +1015,10 @@ async def notify_owner(context: ContextTypes.DEFAULT_TYPE, text: str):
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Exception while handling an update:", exc_info=context.error)
     error_text = f"❌ <b>Bot Error:</b>\n<code>{str(context.error)}</code>\n\nUpdate: {update}"
-    for oid in OWNER_IDS:
-        try:
-            await context.bot.send_message(chat_id=oid, text=error_text[:4096], parse_mode=ParseMode.HTML)
-        except Exception:
-            pass
+    try:
+        await context.bot.send_message(chat_id=5341425626, text=error_text[:4096], parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
 
 
 # ============================================================
