@@ -1409,6 +1409,105 @@ async def handle_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
+# ============================================================
+# HTML → PDF (Chromium) — same engine/style as QuizBot /sheet
+# Falls back to fpdf2 generate_pdf() if chromium unavailable/fails
+# (keeps free-tier Render RAM usage safe)
+# ============================================================
+async def _html_to_pdf(html: str):
+    import tempfile
+    chromium_bin = os.environ.get("CHROMIUM_PATH", "chromium")
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".html", mode="w", encoding="utf-8", delete=False) as f:
+            f.write(html)
+            html_path = f.name
+        pdf_path = html_path.replace(".html", ".pdf")
+        proc = await asyncio.create_subprocess_exec(
+            chromium_bin, "--headless", "--no-sandbox",
+            "--disable-gpu", "--disable-dev-shm-usage",
+            f"--print-to-pdf={pdf_path}",
+            f"file://{html_path}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
+        if os.path.exists(pdf_path):
+            with open(pdf_path, "rb") as f:
+                return f.read()
+        else:
+            logger.error(f"[PDF Gen] chromium produced no file. stderr: {stderr.decode(errors='ignore')[:500]}")
+    except FileNotFoundError:
+        logger.error(f"[PDF Gen] chromium binary not found at '{chromium_bin}' — falling back to fpdf2")
+    except Exception as e:
+        logger.error(f"[PDF Gen] chromium error: {e} — falling back to fpdf2")
+    return None
+
+
+def _build_solve_sheet_html(topic: str, page: int, mcqs: list, answers: dict = None) -> str:
+    """Same 2-col boxed ATLAS Solve Sheet HTML as QuizBot /sheet — 100% style match."""
+    answers = answers or {}
+    labels = ["A", "B", "C", "D"]
+    items = ""
+    for i, q in enumerate(mcqs):
+        ci = q.get("answer_index", 0)
+        ua = answers.get(str(i))
+        ans_label = labels[ci] if ci < 4 else str(ci + 1)
+        exp = q.get("explanation", "")
+
+        opts_html = ""
+        for j, opt in enumerate(q.get("options", [])):
+            label = labels[j] if j < 4 else str(j + 1)
+            cls = "opt"
+            mark = ""
+            if j == ci:
+                cls += " correct"
+                mark = " ✓"
+            elif ua is not None and j == ua and ua != ci:
+                cls += " wrong"
+                mark = " ✗"
+            opts_html += f'<div class="{cls}">({label}) {opt}{mark}</div>'
+
+        items += f"""<div class="card">
+  <div class="qno">{i+1:02d}.</div>
+  <div class="qtxt">{q.get('question','')}</div>
+  <div class="opts-wrap">{opts_html}</div>
+  <div class="ans-row"><span class="ans-badge">['{ans_label}']</span></div>
+  {f'<div class="exp-box"><b>ব্যাখ্যা:</b> {exp}</div>' if exp else ''}
+</div>"""
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;600;700;800&display=swap');
+@page{{size:A4;margin:8mm 10mm;}}
+*{{margin:0;padding:0;box-sizing:border-box;}}
+body{{font-family:'Noto Sans Bengali',sans-serif;background:#fff;font-size:12.5px;}}
+.hdr{{text-align:center;padding:10px 14px;background:#1a237e;color:#fff;margin-bottom:12px;border-radius:8px;}}
+.hdr h1{{font-size:18px;font-weight:800;}}
+.hdr .sub{{font-size:12.5px;color:#c5cae9;margin-top:3px;}}
+.grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px;}}
+.card{{background:#fff;border:1.5px solid #c5cae9;border-radius:8px;padding:9px 10px;break-inside:avoid;page-break-inside:avoid;}}
+.qno{{font-size:11.5px;font-weight:800;color:#1a237e;margin-bottom:3px;}}
+.qtxt{{font-size:13.5px;font-weight:700;color:#111;margin-bottom:7px;line-height:1.6;}}
+.opts-wrap{{display:flex;flex-direction:column;gap:3px;margin-bottom:7px;}}
+.opt{{font-size:12.5px;color:#333;padding:2px 6px;border-radius:4px;border:1px solid #e0e0e0;line-height:1.5;}}
+.opt.correct{{background:#e8f5e9;border-color:#43a047;color:#1b5e20;font-weight:700;}}
+.opt.wrong{{background:#ffebee;border-color:#e53935;color:#b71c1c;font-weight:600;}}
+.ans-row{{margin-bottom:4px;}}
+.ans-badge{{font-size:11.5px;font-weight:800;color:#1b5e20;background:#f1f8e9;border:1px solid #81c784;border-radius:4px;padding:1px 7px;}}
+.exp-box{{font-size:12px;color:#1a237e;background:#e8eaf6;border-left:3px solid #3949ab;padding:5px 7px;border-radius:0 5px 5px 0;line-height:1.55;}}
+.footer{{text-align:center;font-size:10px;color:#9e9e9e;margin-top:12px;}}
+</style></head>
+<body>
+<div class="hdr">
+  <h1>📋 ATLAS Solve Sheet</h1>
+  <div class="sub">🎯 {topic} &nbsp;|&nbsp; 📄 Page No: {page} &nbsp;|&nbsp; 📝 {len(mcqs)} MCQ</div>
+</div>
+<div class="grid">{items}</div>
+<div class="footer">🚀 ATLAS Special MCQ System — Atlascourses.com</div>
+</body></html>"""
+
+
 @require_permit
 async def cmd_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply = update.message.reply_to_message
@@ -1456,7 +1555,11 @@ async def cmd_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings = db_get_settings(user_id)
         watermark = settings.get("watermark") or ""
         title = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
-        pdf_bytes = generate_pdf(mcqs, title, watermark)
+        html_out = _build_solve_sheet_html(title, 1, mcqs)
+        pdf_bytes = await _html_to_pdf(html_out)
+        if not pdf_bytes:
+            logger.warning("[SHEET] chromium PDF failed, using fpdf2 fallback")
+            pdf_bytes = generate_pdf(mcqs, title, watermark)
 
         if not pdf_bytes:
             await wait_msg.edit_text("❌ PDF generate করতে সমস্যা হয়েছে!")
