@@ -1055,7 +1055,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/channel (id) (name) — চ্যানেল যোগ করুন\n"
             "/channellist — যোগ করা চ্যানেলের তালিকা\n"
             "/removechannel (id) — চ্যানেল সরান\n"
-            "/tagQ (name) — প্রশ্নের ট্যাগ সেট করুন\n"
+            "/tag (name) — প্রশ্নের ট্যাগ সেট করুন\n"
             "/exp — Explanation settings\n"
             "/img — ছবি থেকে MCQ বানান\n"
             "/pdf — PDF থেকে MCQ বানান\n"
@@ -1065,7 +1065,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text += (
             "📋 <b>Available Commands:</b>\n"
-            "/tagQ (name) — প্রশ্নের ট্যাগ সেট করুন\n"
+            "/tag (name) — প্রশ্নের ট্যাগ সেট করুন\n"
             "/exp — Explanation settings\n"
             "/img — ছবি থেকে MCQ বানান\n"
             "/pdf — PDF থেকে MCQ বানান\n"
@@ -1257,7 +1257,7 @@ async def channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @require_permit
 async def cmd_tagq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Format: /tagQ (name)")
+        await update.message.reply_text("Format: /tag (name)")
         return
     name = " ".join(context.args).strip()
     user_id = update.effective_user.id
@@ -2163,7 +2163,7 @@ def main():
     ptb_app.add_handler(CommandHandler("channel", cmd_channel))
     ptb_app.add_handler(CommandHandler("channellist", cmd_channellist))
     ptb_app.add_handler(CommandHandler("removechannel", cmd_removechannel))
-    ptb_app.add_handler(CommandHandler("tagQ", cmd_tagq))
+    ptb_app.add_handler(CommandHandler("tag", cmd_tagq))
     ptb_app.add_handler(CommandHandler("exp", cmd_exp))
     ptb_app.add_handler(CommandHandler("img", cmd_img))
     ptb_app.add_handler(CommandHandler("pdf", cmd_pdf))
