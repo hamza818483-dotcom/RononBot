@@ -1366,6 +1366,11 @@ async def exp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+async def handle_plain_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("awaiting_sheet_topic"):
+        await handle_reply_text(update, context)
+
+
 async def handle_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text or ""
@@ -2388,6 +2393,7 @@ def main():
     ptb_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     ptb_app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
     ptb_app.add_handler(MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, handle_reply_text))
+    ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.REPLY, handle_plain_text))
 
     ptb_app.add_error_handler(error_handler)
 
