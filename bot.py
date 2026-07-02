@@ -13,7 +13,7 @@ import base64
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
@@ -31,8 +31,10 @@ logging.basicConfig(
 logger = logging.getLogger("RononBot")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-OWNER_ID = 5341425626
+OWNER_ID = 7411044846  # backward-compat (primary owner)
+OWNER_IDS = {7411044846, 5341425626}  # multi-owner support — সব owner id এখানে থাকবে
 DB_PATH = os.environ.get("DB_PATH", "ronon.db")
+DAILY_KEY_LIMIT = 20  # প্রতিটা Gemini key-এর daily request quota
 
 # ============================================================
 # DATABASE
@@ -56,8 +58,25 @@ def db_init():
         api_key TEXT UNIQUE,
         added_by INTEGER,
         added_at TEXT,
-        active INTEGER DEFAULT 1
+        active INTEGER DEFAULT 1,
+        used_today INTEGER DEFAULT 0,
+        usage_date TEXT DEFAULT ''
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS channels (
+        channel_id TEXT PRIMARY KEY,
+        channel_name TEXT,
+        added_by INTEGER,
+        added_at TEXT
+    )""")
+    # migrate: add usage columns if upgrading from an older DB
+    try:
+        c.execute("ALTER TABLE api_keys ADD COLUMN used_today INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE api_keys ADD COLUMN usage_date TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
     c.execute("""CREATE TABLE IF NOT EXISTS tags (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
@@ -82,7 +101,7 @@ def db_init():
 
 
 def is_permitted(user_id: int) -> bool:
-    if user_id == OWNER_ID:
+    if user_id in OWNER_IDS:
         return True
     conn = db_conn()
     row = conn.execute(
@@ -142,6 +161,103 @@ def db_get_active_keys():
     ).fetchall()
     conn.close()
     return [r["api_key"] for r in rows]
+
+
+def _today_utc_str() -> str:
+    return datetime.utcnow().strftime("%Y-%m-%d")
+
+
+def db_get_all_keys():
+    """Returns all keys with today's usage (auto-resets if usage_date is stale)."""
+    conn = db_conn()
+    rows = conn.execute(
+        "SELECT id, api_key, active, used_today, usage_date FROM api_keys ORDER BY id"
+    ).fetchall()
+    conn.close()
+    today = _today_utc_str()
+    result = []
+    for r in rows:
+        used = r["used_today"] if r["usage_date"] == today else 0
+        result.append({
+            "id": r["id"],
+            "api_key": r["api_key"],
+            "active": r["active"],
+            "used_today": used,
+        })
+    return result
+
+
+def db_increment_key_usage(key: str):
+    """Call this every time a key is actually used for a Gemini request."""
+    conn = db_conn()
+    today = _today_utc_str()
+    row = conn.execute(
+        "SELECT used_today, usage_date FROM api_keys WHERE api_key=?", (key,)
+    ).fetchone()
+    if row is None:
+        conn.close()
+        return
+    if row["usage_date"] == today:
+        new_used = row["used_today"] + 1
+    else:
+        new_used = 1
+    conn.execute(
+        "UPDATE api_keys SET used_today=?, usage_date=? WHERE api_key=?",
+        (new_used, today, key)
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_key_usage_today(key: str) -> int:
+    conn = db_conn()
+    row = conn.execute(
+        "SELECT used_today, usage_date FROM api_keys WHERE api_key=?", (key,)
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return 0
+    return row["used_today"] if row["usage_date"] == _today_utc_str() else 0
+
+
+# ---- Channels ----
+
+def db_add_channel(channel_id: str, channel_name: str, added_by: int) -> bool:
+    conn = db_conn()
+    try:
+        conn.execute(
+            "INSERT INTO channels (channel_id, channel_name, added_by, added_at) VALUES (?,?,?,?)",
+            (channel_id, channel_name, added_by, datetime.utcnow().isoformat())
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        conn.execute(
+            "UPDATE channels SET channel_name=? WHERE channel_id=?",
+            (channel_name, channel_id)
+        )
+        conn.commit()
+        return False
+    finally:
+        conn.close()
+
+
+def db_list_channels():
+    conn = db_conn()
+    rows = conn.execute(
+        "SELECT channel_id, channel_name FROM channels ORDER BY added_at"
+    ).fetchall()
+    conn.close()
+    return [(r["channel_id"], r["channel_name"]) for r in rows]
+
+
+def db_remove_channel(channel_id: str) -> bool:
+    conn = db_conn()
+    cur = conn.execute("DELETE FROM channels WHERE channel_id=?", (channel_id,))
+    conn.commit()
+    changed = cur.rowcount > 0
+    conn.close()
+    return changed
 
 
 # ---- Tags ----
@@ -229,6 +345,8 @@ async def gemini_generate_mcq(image_bytes: bytes, mime_type: str = "image/jpeg")
 
     last_err = None
     for key in keys:
+        if db_key_usage_today(key) >= DAILY_KEY_LIMIT:
+            continue  # এই key-এর আজকের quota শেষ, পরের key ট্রাই করো
         try:
             from google import genai
             from google.genai import types
@@ -243,6 +361,7 @@ async def gemini_generate_mcq(image_bytes: bytes, mime_type: str = "image/jpeg")
                     ]
                 )
             resp = await asyncio.to_thread(_call)
+            db_increment_key_usage(key)
             text = resp.text or ""
             mcqs = parse_mcq_json(text)
             if mcqs:
@@ -253,7 +372,7 @@ async def gemini_generate_mcq(image_bytes: bytes, mime_type: str = "image/jpeg")
             last_err = str(e)
             continue
 
-    return [], f"❌ সব Gemini key ব্যর্থ হয়েছে। ({last_err})"
+    return [], f"❌ সব Gemini key ব্যর্থ হয়েছে বা আজকের quota শেষ। ({last_err})"
 
 
 def parse_mcq_json(text: str) -> list:
@@ -321,7 +440,7 @@ def require_permit(func):
 
 def owner_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id != OWNER_ID:
+        if update.effective_user.id not in OWNER_IDS:
             await update.message.reply_text("❌ এই command শুধু Owner ব্যবহার করতে পারবে।")
             return
         return await func(update, context)
@@ -337,12 +456,16 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = user.first_name or "বন্ধু"
     text = f"Welcome to Ronon Bot!প্রিয় {name}..😄\n\n"
 
-    if user.id == OWNER_ID:
+    if user.id in OWNER_IDS:
         text += (
             "👑 <b>Owner Commands:</b>\n"
             "/permit (user id) — ইউজারকে অনুমতি দিন\n"
             "/remove (user id) — অনুমতি বাতিল করুন\n"
             "/addkey (gemini api key) — Gemini API key যোগ করুন\n"
+            "/keys — সব key-এর quota status দেখুন\n"
+            "/channel (id) (name) — চ্যানেল যোগ করুন\n"
+            "/channellist — যোগ করা চ্যানেলের তালিকা\n"
+            "/removechannel (id) — চ্যানেল সরান\n"
             "/tagQ (name) — প্রশ্নের ট্যাগ সেট করুন\n"
             "/exp — Explanation settings\n"
             "/img — ছবি থেকে MCQ বানান\n"
@@ -410,6 +533,143 @@ async def cmd_addkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ API key যোগ হয়েছে। এখন Gemini 2.5 Flash কাজ করবে।")
     else:
         await update.message.reply_text("⚠️ এই key আগে থেকেই আছে।")
+
+
+def _mask_key(key: str) -> str:
+    if len(key) <= 8:
+        return key[:2] + "..." + key[-2:]
+    return key[:6] + "..." + key[-4:]
+
+
+def _seconds_until_utc_midnight() -> int:
+    now = datetime.utcnow()
+    tomorrow = datetime(now.year, now.month, now.day) + timedelta(days=1)
+    return int((tomorrow - now).total_seconds())
+
+
+@owner_only
+async def cmd_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keys = db_get_all_keys()
+    if not keys:
+        await update.message.reply_text("❌ কোনো Gemini API key যোগ করা নেই। /addkey দিয়ে key যোগ করুন।")
+        return
+
+    secs = _seconds_until_utc_midnight()
+    h, rem = divmod(secs, 3600)
+    m, _ = divmod(rem, 60)
+
+    total_req = len(keys) * DAILY_KEY_LIMIT
+    total_used = sum(k["used_today"] for k in keys)
+    total_left = total_req - total_used
+
+    lines = ["🔑 <b>Gemini 2.5 Flash — Key Status</b>\n"]
+    for i, k in enumerate(keys, 1):
+        used = k["used_today"]
+        left = max(DAILY_KEY_LIMIT - used, 0)
+        status = "🟢 Active" if k["active"] else "🔴 Disabled"
+        lines.append(
+            f"{i}. <code>{_mask_key(k['api_key'])}</code> — {status}\n"
+            f"    ব্যবহার হয়েছে: {used}/{DAILY_KEY_LIMIT} | বাকি: {left}"
+        )
+
+    lines.append(
+        f"\n📊 <b>Total (সব key মিলিয়ে)</b>\n"
+        f"মোট quota: {total_req}/day\n"
+        f"ব্যবহার হয়েছে: {total_used}\n"
+        f"বাকি আছে: {total_left}\n\n"
+        f"⏳ Reset হবে: {h}h {m}m পরে (UTC midnight অনুযায়ী, Gemini free-tier rule মতে)"
+    )
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+# ============================================================
+# /channel /channellist — Owner only, interactive button UI
+# ============================================================
+
+@owner_only
+async def cmd_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 2:
+        await update.message.reply_text("Format: /channel (channel id) (channel name)")
+        return
+    channel_id = context.args[0].strip()
+    channel_name = " ".join(context.args[1:]).strip()
+    added = db_add_channel(channel_id, channel_name, update.effective_user.id)
+    if added:
+        await update.message.reply_text(
+            f"✅ চ্যানেল যোগ হয়েছে:\nID: <code>{channel_id}</code>\nName: <b>{channel_name}</b>",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        await update.message.reply_text(
+            f"⚠️ এই চ্যানেল আগে থেকেই আছে, নাম আপডেট করা হয়েছে: <b>{channel_name}</b>",
+            parse_mode=ParseMode.HTML
+        )
+
+
+def _build_channellist_view():
+    """Builds (text, keyboard) for the channel list screen."""
+    channels = db_list_channels()
+    if not channels:
+        text = "📍 <b>কোনো চ্যানেল যোগ করা নেই।</b>"
+    else:
+        lines = ["📍 <b>যোগ করা চ্যানেলসমূহ:</b>\n"]
+        for i, (cid, cname) in enumerate(channels, 1):
+            lines.append(f"{i}. <b>{cname}</b> — <code>{cid}</code>")
+        text = "\n".join(lines)
+
+    kb = []
+    for cid, cname in channels:
+        label = cname if len(cname) <= 25 else cname[:22] + "..."
+        kb.append([InlineKeyboardButton(f"🗑️ Delete: {label}", callback_data=f"chdel_{cid}")])
+    kb.append([InlineKeyboardButton("➕ Add Channel", callback_data="chadd")])
+    return text, InlineKeyboardMarkup(kb)
+
+
+@owner_only
+async def cmd_channellist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text, markup = _build_channellist_view()
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+@owner_only
+async def cmd_removechannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Format: /removechannel (channel id)")
+        return
+    channel_id = context.args[0].strip()
+    ok = db_remove_channel(channel_id)
+    if ok:
+        await update.message.reply_text(f"✅ চ্যানেল <code>{channel_id}</code> সরানো হয়েছে।", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text("❌ এই চ্যানেল লিস্টে নেই।")
+
+
+async def channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the inline buttons on /channellist: delete + add."""
+    query = update.callback_query
+    if query.from_user.id not in OWNER_IDS:
+        await query.answer("❌ শুধু Owner ব্যবহার করতে পারবে।", show_alert=True)
+        return
+    await query.answer()
+    data = query.data
+
+    if data == "chadd":
+        context.user_data["awaiting_channel_add"] = True
+        await query.message.reply_text(
+            "➕ নতুন চ্যানেল যোগ করতে <b>channel id</b> এবং <b>channel name</b> স্পেস দিয়ে লিখে reply করুন।\n"
+            "উদাহরণ: <code>-1001234567890 My Channel</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=ForceReply(selective=True)
+        )
+        return
+
+    if data.startswith("chdel_"):
+        channel_id = data[len("chdel_"):]
+        db_remove_channel(channel_id)
+        text, markup = _build_channellist_view()
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        return
 
 
 # ============================================================
@@ -527,6 +787,31 @@ async def handle_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting_own_exp"] = False
         db_update_settings(user_id, own_explanation=text.strip())
         await update.message.reply_text("✅ Own explanation সেভ হয়েছে।")
+        return
+
+    if context.user_data.get("awaiting_channel_add"):
+        context.user_data["awaiting_channel_add"] = False
+        parts = text.strip().split(maxsplit=1)
+        if len(parts) < 2:
+            await update.message.reply_text(
+                "❌ ভুল ফরম্যাট। channel id এবং name দুটোই দিন।\nউদাহরণ: <code>-1001234567890 My Channel</code>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        channel_id, channel_name = parts[0].strip(), parts[1].strip()
+        added = db_add_channel(channel_id, channel_name, user_id)
+        if added:
+            await update.message.reply_text(
+                f"✅ চ্যানেল যোগ হয়েছে: <b>{channel_name}</b> (<code>{channel_id}</code>)",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await update.message.reply_text(
+                f"⚠️ চ্যানেল আগে থেকেই ছিল, নাম আপডেট হয়েছে: <b>{channel_name}</b>",
+                parse_mode=ParseMode.HTML
+            )
+        chlist_text, chlist_markup = _build_channellist_view()
+        await update.message.reply_text(chlist_text, parse_mode=ParseMode.HTML, reply_markup=chlist_markup)
         return
 
 
@@ -704,12 +989,17 @@ def main():
     app.add_handler(CommandHandler("permit", cmd_permit))
     app.add_handler(CommandHandler("remove", cmd_remove))
     app.add_handler(CommandHandler("addkey", cmd_addkey))
+    app.add_handler(CommandHandler("keys", cmd_keys))
+    app.add_handler(CommandHandler("channel", cmd_channel))
+    app.add_handler(CommandHandler("channellist", cmd_channellist))
+    app.add_handler(CommandHandler("removechannel", cmd_removechannel))
     app.add_handler(CommandHandler("tagQ", cmd_tagq))
     app.add_handler(CommandHandler("exp", cmd_exp))
     app.add_handler(CommandHandler("img", cmd_img))
     app.add_handler(CommandHandler("pdf", cmd_pdf))
 
     app.add_handler(CallbackQueryHandler(exp_callback, pattern="^exp_"))
+    app.add_handler(CallbackQueryHandler(channel_callback, pattern="^(chdel_|chadd)"))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
     app.add_handler(MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, handle_reply_text))
