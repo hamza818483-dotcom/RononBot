@@ -1554,8 +1554,8 @@ body{{font-family:'Noto Sans Bengali','Noto Sans','Noto Sans Bengali UI',sans-se
 .hdr h1{{font-size:20px;font-weight:800;}}
 .hdr .sub{{font-size:14px;color:#c5cae9;margin-top:3px;}}
 .hdr .brand{{font-size:12.5px;color:#9fa8da;margin-top:2px;}}
-.grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px;}}
-.card{{background:#fff;border:1.5px solid #c5cae9;border-radius:8px;padding:9px 10px;break-inside:avoid;page-break-inside:avoid;}}
+.grid{{column-count:2;column-gap:10px;}}
+.card{{background:#fff;border:1.5px solid #c5cae9;border-radius:8px;padding:9px 10px;break-inside:avoid;page-break-inside:avoid;margin-bottom:10px;display:inline-block;width:100%;}}
 .qno{{font-size:13px;font-weight:800;color:#1a237e;margin-bottom:3px;}}
 .qtxt{{font-size:15px;font-weight:700;color:#111;margin-bottom:7px;line-height:1.6;}}
 .opts-wrap{{display:flex;flex-direction:column;gap:3px;margin-bottom:7px;}}
