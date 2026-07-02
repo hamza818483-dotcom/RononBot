@@ -851,6 +851,16 @@ async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🏓 Pong! Bot is online.")
 
 
+async def cmd_dbstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if sb:
+        await update.message.reply_text("✅ Supabase connected — data persistent থাকবে restart এর পরেও।")
+    else:
+        await update.message.reply_text(
+            "❌ Supabase NOT connected — SUPABASE_URL/SUPABASE_KEY env var missing।\n"
+            "এখন ephemeral SQLite ব্যবহার হচ্ছে, restart হলেই সব ডেটা মুছে যাবে।"
+        )
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     name = user.first_name or "বন্ধু"
@@ -987,14 +997,15 @@ async def cmd_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     channel_id = context.args[0].strip()
     channel_name = " ".join(context.args[1:]).strip()
     added = db_add_channel(channel_id, channel_name, update.effective_user.id)
+    warn = "" if sb else "\n\n⚠️ <b>SUPABASE_URL/SUPABASE_KEY সেট নেই — এই ডেটা restart এ মুছে যাবে!</b> Render env vars এ যোগ করো।"
     if added:
         await update.message.reply_text(
-            f"✅ চ্যানেল যোগ হয়েছে:\nID: <code>{channel_id}</code>\nName: <b>{channel_name}</b>",
+            f"✅ চ্যানেল যোগ হয়েছে:\nID: <code>{channel_id}</code>\nName: <b>{channel_name}</b>{warn}",
             parse_mode=ParseMode.HTML
         )
     else:
         await update.message.reply_text(
-            f"⚠️ এই চ্যানেল আগে থেকেই আছে, নাম আপডেট করা হয়েছে: <b>{channel_name}</b>",
+            f"⚠️ এই চ্যানেল আগে থেকেই আছে, নাম আপডেট করা হয়েছে: <b>{channel_name}</b>{warn}",
             parse_mode=ParseMode.HTML
         )
 
@@ -1834,6 +1845,7 @@ def main():
     ptb_app.add_handler(CommandHandler("pdf", cmd_pdf))
     ptb_app.add_handler(CommandHandler("wm", cmd_wm))
     ptb_app.add_handler(CommandHandler("ping", cmd_ping))
+    ptb_app.add_handler(CommandHandler("dbstatus", cmd_dbstatus))
 
     ptb_app.add_handler(CallbackQueryHandler(exp_callback, pattern="^exp_"))
     ptb_app.add_handler(CallbackQueryHandler(channel_callback, pattern="^(chdel_|chadd)"))
