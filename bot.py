@@ -109,8 +109,71 @@ def db_init():
         current_exp_tag TEXT DEFAULT '',
         watermark TEXT DEFAULT ''
     )""")
+    # /pdf processing session progress — QuizBot-এর pdf_sessions টেবিলের মতোই।
+    # ক্র্যাশ/restart হলে কোন session কতদূর প্রসেস হয়েছিল তা track রাখার জন্য
+    # (এখন শুধু persistence/visibility purpose-এ, auto-resume এখনো implement করা হয়নি)।
+    c.execute("""CREATE TABLE IF NOT EXISTS pdf_sessions (
+        id TEXT PRIMARY KEY,
+        user_id INTEGER,
+        user_name TEXT,
+        topic TEXT,
+        channel_id TEXT,
+        total_pages INTEGER,
+        processed_pages INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'processing',
+        created_at TEXT
+    )""")
     conn.commit()
     conn.close()
+
+
+def gen_session_id() -> str:
+    import random, string
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+
+
+def db_save_session(session_id: str, data: dict):
+    """QuizBot-এর db_save_session-এর মতো — /pdf processing শুরু হওয়ার সময় session তৈরি করে,
+    যাতে চলমান progress কোথাও persist থাকে (ক্র্যাশ/restart হলেও দেখা যাবে কতদূর হয়েছিল)।"""
+    try:
+        if sb:
+            sb.table("ronon_pdf_sessions").upsert({"id": session_id, **data}).execute()
+            return
+        conn = db_conn()
+        c = conn.cursor()
+        c.execute("""INSERT OR REPLACE INTO pdf_sessions
+            (id, user_id, user_name, topic, channel_id, total_pages, processed_pages, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, data.get("user_id"), data.get("user_name"), data.get("topic"),
+             data.get("channel_id"), data.get("total_pages"), data.get("processed_pages", 0),
+             data.get("status", "processing"), datetime.utcnow().isoformat()))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"[DB] save_session error: {e}")
+
+
+def db_update_session_progress(session_id: str, processed_pages: int, status: str = None):
+    """প্রতিটা page শেষ হওয়ার পর progress আপডেট করে — bulk generate লুপের ভেতর থেকে বারবার কল হয়।"""
+    try:
+        fields = {"processed_pages": processed_pages}
+        if status:
+            fields["status"] = status
+        if sb:
+            sb.table("ronon_pdf_sessions").update(fields).eq("id", session_id).execute()
+            return
+        conn = db_conn()
+        c = conn.cursor()
+        if status:
+            c.execute("UPDATE pdf_sessions SET processed_pages=?, status=? WHERE id=?",
+                      (processed_pages, status, session_id))
+        else:
+            c.execute("UPDATE pdf_sessions SET processed_pages=? WHERE id=?",
+                      (processed_pages, session_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"[DB] update_session_progress error: {e}")
 
 
 def is_permitted(user_id: int) -> bool:
@@ -1608,6 +1671,15 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
         total_mcq = 0
         total_polls = 0
 
+        # Session তৈরি — এখন থেকে এই processing-এর progress persist থাকবে (Supabase/SQLite),
+        # ক্র্যাশ হলেও কতদূর হয়েছিল সেটা DB-তে দেখা যাবে (QuizBot-এর pdf_sessions-এর মতো)
+        session_id = gen_session_id()
+        db_save_session(session_id, {
+            "user_id": user_id, "user_name": uname, "topic": topic,
+            "channel_id": str(channel_id or ""), "total_pages": len(pages),
+            "processed_pages": 0, "status": "processing"
+        })
+
         await status_message.edit_text(
             build_pdf_dashboard(doc.file_name, topic, page_status, start_time, 0, 0),
             parse_mode=ParseMode.HTML
@@ -1710,6 +1782,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
                     build_pdf_dashboard(doc.file_name, topic, page_status, start_time, total_mcq, total_polls),
                     parse_mode=ParseMode.HTML
                 )
+                db_update_session_progress(session_id, page_num)
 
             except Exception as e:
                 logger.error(f"[PDF] Page {page_num} error: {e}", exc_info=True)
@@ -1748,6 +1821,8 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
         ]
         context.user_data["pdf_topic"] = topic
 
+        db_update_session_progress(session_id, len(pages), status="done")
+
         elapsed = int(time.time() - start_time)
         mins, secs = divmod(elapsed, 60)
         await status_message.edit_text(
@@ -1758,6 +1833,10 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
 
     except Exception as e:
         logger.error(f"process_pdf error: {e}", exc_info=True)
+        try:
+            db_update_session_progress(session_id, 0, status="failed")
+        except Exception:
+            pass  # session_id হয়তো এখনো তৈরি হয়নি (খুব প্রথম দিকেই error হলে)
         await status_message.edit_text(f"❌ Error: {e}")
 
 
