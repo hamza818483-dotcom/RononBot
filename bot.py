@@ -326,19 +326,65 @@ def db_get_exp_tags(user_id: int):
 # GEMINI MCQ GENERATION
 # ============================================================
 
-MCQ_PROMPT_TEMPLATE = """তুমি একজন expert MCQ generator। এই ইমেজ/PDF page থেকে {count_hint} MCQ (Multiple Choice Question) বানাও।
+MCQ_PROMPT_WITH_COUNT = """📝 Special MCQ TYPE: Standard Easy
 
-নিয়ম:
-- যদি ছবিতে আগে থেকে MCQ থাকে, সেগুলোও extract করে সঠিক format-এ দাও
-- পাশাপাশি content থেকে নতুন MCQ তৈরি করো
-- প্রতিটা MCQ-তে 4টি option (A,B,C,D) থাকবে
-- Answer অবশ্যই সঠিক হতে হবে
-- ছোট explanation দিবে (1-2 লাইন)
-- Source content-এর ভাষাতেই MCQ বানাবে (বাংলা হলে বাংলা, English হলে English)
+🟥Overall Instructions:
+-Image এ আগে থেকে MCQ বানানো থাকুক বা Information থাকুক,সকল জায়গা থেকেই প্রশ্ন বানাবে
+-কোনো টেক্সটের নিচে কালার মার্ক বা কোনো টেক্সট হাইলাইটেড থাকলে সেখান থেকে প্রশ্ন বানানো মিস দেওয়া যাবে না (must priority)
+-কোয়ালিটিফুল প্রশ্ন বানাতে হবে
+-ছক থাকলে স্পেশাল প্রায়োরিটি পাবে (Use Every Information for Making MCQ)
+-টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা,সেকশনের নাম,"Card 1"/"Card 2" এর মতো navigation/label টেক্সট এসব থেকে MCQ বানাবে না — না প্রশ্নে, না অপশনে। এগুলো শুধু structural/navigation elements, প্রকৃত জ্ঞান/তথ্য না।
+-প্রতিটি অপশন অবশ্যই actual factual content হতে হবে (definition, cause, treatment, value, name of a real concept ইত্যাদি) — কখনোই কোনো section heading, card/page label, বা navigation text কোনো option হিসেবে ব্যবহার করা যাবে না
+-MUST বানাতে হবে exactly {count} টি MCQ, কম বেশি নয়
+-Highest quality MCQ বানাবে
 
-Return ONLY valid JSON array, no markdown, no extra text:
-[{"question":"...","options":["...","...","...","..."],"answer":"A","explanation":"..."}]
-"""
+🌐 LANGUAGE RULE (STRICT — MUST FOLLOW):
+-Source image-এর মূল ভাষা যা থাকবে (Bengali বা English), Question + Options + Explanation সবকিছু সেই একই ভাষায় লিখতে হবে
+-Source ইংরেজি হলে পুরো MCQ ইংরেজিতে লিখবে — বাংলায় translate করা সম্পূর্ণ নিষেধ
+-Source বাংলা হলে পুরো MCQ বাংলায় লিখবে — ইংরেজিতে translate করা সম্পূর্ণ নিষেধ
+-Mixed-language source হলে, যে অংশ থেকে প্রশ্ন বানাচ্ছো সেই অংশের ভাষা অনুসরণ করবে
+
+💥প্রশ্ন: (ছোট, ১/১.৫/২ লাইন)
+💥অপশন: (৪টি, ছোট+মিক্সড সোর্স থেকে)
+-অপশনে সঠিক উত্তর অবশ্যই একটিই থাকবে
+-৪টি অপশনই তথ্য দ্বারা পরিপূর্ণ থাকবে। হ্যাঁ,না,সত্য,মিথ্যা থাকবে না
+💥উত্তর: A/B/C/D — MUST be distributed across different options. STRICTLY FORBIDDEN: all answers being "A" or same option. Each MCQ's correct answer MUST be placed at a different position (A, B, C, or D) — vary them naturally across questions.
+💥ব্যাখ্যা: max 200 chars, source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)
+
+MUST Return ONLY valid JSON array, no markdown:
+[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"..."}}]"""
+
+MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
+
+🟥Overall Instructions:
+-Image এ আগে থেকে MCQ বানানো থাকুক বা Information থাকুক,সকল জায়গা থেকেই প্রশ্ন বানাবে
+-কোনো টেক্সটের নিচে কালার মার্ক বা কোনো টেক্সট হাইলাইটেড থাকলে সেখান থেকে প্রশ্ন বানানো মিস দেওয়া যাবে না (must priority)
+-কোয়ালিটিফুল প্রশ্ন বানাতে হবে
+-এমনভাবে সকল প্রশ্ন বানাবে যাতে সকল লাইন থেকে MCQ কিভাবে আসতে পারে আইডিয়া হয়ে যাবে
+-ছক থাকলে স্পেশাল প্রায়োরিটি পাবে (Use Every Information for Making MCQ)
+-টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা,সেকশনের নাম,"Card 1"/"Card 2" এর মতো navigation/label টেক্সট এসব থেকে MCQ বানাবে না — না প্রশ্নে, না অপশনে। এগুলো শুধু structural/navigation elements, প্রকৃত জ্ঞান/তথ্য না।
+-প্রতিটি অপশন অবশ্যই actual factual content হতে হবে (definition, cause, treatment, value, name of a real concept ইত্যাদি) — কখনোই কোনো section heading, card/page label, বা navigation text কোনো option হিসেবে ব্যবহার করা যাবে না
+-হাবিজাবি MCQ বানানো যাবে না,বেশি প্রশ্ন বানানোর প্রয়োজনে একটি MCQ কেই ঘুরিয়ে ফিরিয়ে দেওয়া যেতে পারে
+-MAXIMUM possible MCQ বানাবে — প্রতিটি লাইন, বক্স, তথ্য, সোর্স use করে
+-তথ্য কম থাকলে minimum 10 টি
+
+🌐 LANGUAGE RULE (STRICT — MUST FOLLOW):
+-Source image-এর মূল ভাষা যা থাকবে (Bengali বা English), Question + Options + Explanation সবকিছু সেই একই ভাষায় লিখতে হবে
+-Source ইংরেজি হলে পুরো MCQ ইংরেজিতে লিখবে — বাংলায় translate করা সম্পূর্ণ নিষেধ
+-Source বাংলা হলে পুরো MCQ বাংলায় লিখবে — ইংরেজিতে translate করা সম্পূর্ণ নিষেধ
+-Mixed-language source হলে, যে অংশ থেকে প্রশ্ন বানাচ্ছো সেই অংশের ভাষা অনুসরণ করবে
+
+💥প্রশ্ন: (ছোট, ১/১.৫/২ লাইন)
+-সোর্স থেকে সকল টাইপের প্রশ্ন
+-যতভাবে প্রশ্ন আসতে পারে সব বানাবে
+💥অপশন: (৪টি, ছোট+20% বড়, মিক্সড সোর্স)
+-অপশনে সঠিক উত্তর একটিই
+-৪টি অপশনই তথ্য দ্বারা পরিপূর্ণ। হ্যাঁ,না,সত্য,মিথ্যা থাকবে না
+💥উত্তর: A/B/C/D — MUST be distributed across different options. STRICTLY FORBIDDEN: all answers being "A" or same option. Each MCQ's correct answer MUST be placed at a different position — vary them naturally so answers are spread across A, B, C, D positions.
+💥ব্যাখ্যা: max 200 chars, source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)
+
+MUST Return ONLY valid JSON array, no markdown:
+[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"C","explanation":"..."}}]"""
 
 
 async def gemini_generate_mcq(image_bytes: bytes, mime_type: str = "image/jpeg", count: int = None) -> tuple:
@@ -347,11 +393,9 @@ async def gemini_generate_mcq(image_bytes: bytes, mime_type: str = "image/jpeg",
         return [], "❌ কোনো Gemini API key যোগ করা নেই। /addkey দিয়ে key যোগ করুন।"
 
     if count:
-        count_hint = f"সঠিকভাবে {count} টি"
+        prompt = MCQ_PROMPT_WITH_COUNT.format(count=count)
     else:
-        count_hint = "যত সম্ভব ভালো মানের (সর্বোচ্চ সংখ্যক)"
-
-    prompt = MCQ_PROMPT_TEMPLATE.format(count_hint=count_hint)
+        prompt = MCQ_PROMPT_MAX
 
     last_err = None
     for key in keys:
@@ -407,6 +451,8 @@ def parse_mcq_json(text: str) -> list:
 
     valid = []
     letter_map = {"A": 0, "B": 1, "C": 2, "D": 3}
+    idx_to_letter = {0: "A", 1: "B", 2: "C", 3: "D"}
+    nav_label_re = re.compile(r'^(card|page|section|chapter|part|topic|slide)\s*\d*$', re.IGNORECASE)
     for m in data:
         try:
             if not isinstance(m, dict):
@@ -417,6 +463,10 @@ def parse_mcq_json(text: str) -> list:
             if not isinstance(opts, list) or len(opts) < 4:
                 continue
             opts = [str(o).strip() for o in opts[:4]]
+            # Reject MCQs where an option leaked page/section navigation text
+            # (e.g. "Card 1", "Section 2") instead of real factual content.
+            if any(nav_label_re.match(o) for o in opts):
+                continue
             ans = m.get("answer", "A")
             if isinstance(ans, str):
                 ans_idx = letter_map.get(ans.strip().upper()[:1], None)
@@ -435,6 +485,21 @@ def parse_mcq_json(text: str) -> list:
         except Exception as e:
             logger.warning(f"parse_mcq_json: skipped malformed item: {e}")
             continue
+
+    # If every MCQ's correct answer landed on the same option letter (a known
+    # Gemini bias), redistribute answers evenly across A/B/C/D by swapping
+    # the correct option into a rotating slot per item.
+    if valid:
+        answer_indices = [v["answer_index"] for v in valid]
+        if len(set(answer_indices)) == 1:
+            for i, v in enumerate(valid):
+                new_idx = i % 4
+                old_idx = v["answer_index"]
+                opts = v["options"][:]
+                opts[old_idx], opts[new_idx] = opts[new_idx], opts[old_idx]
+                v["options"] = opts
+                v["answer_index"] = new_idx
+
     return valid
 
 
