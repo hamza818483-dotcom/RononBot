@@ -1484,70 +1484,84 @@ async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # NEW: reply-based immediate processing
     if update.message.reply_to_message and update.message.reply_to_message.document:
         doc = update.message.reply_to_message.document
-        if doc.file_name.lower().endswith(".pdf"):
-            text = update.message.text or ""
-            args = context.args
+        # file_name None হতে পারে (কিছু client/forward-এ metadata থাকে না) — আগে এখানে
+        # .lower() সরাসরি None-এর উপর কল হয়ে crash করতো, পুরো command silently fail করতো।
+        # QuizBot-এর মতোই এখন mime_type দিয়েও PDF চেক করা হয়, filename না থাকলেও কাজ করবে।
+        file_name = doc.file_name or "document.pdf"
+        is_pdf = file_name.lower().endswith(".pdf") or (doc.mime_type == "application/pdf")
 
-            page_range = None
-            channel_id = None
-            topic = DEFAULT_TOPIC
-            per_page_count = None
-
-            i = 0
-            while i < len(args):
-                if args[i] == "-p" and i + 1 < len(args):
-                    page_range = args[i + 1]
-                    i += 2
-                elif args[i] == "-c" and i + 1 < len(args):
-                    channel_id = args[i + 1]
-                    i += 2
-                elif args[i] == "-m" and i + 1 < len(args):
-                    topic = args[i + 1].strip('"\'')
-                    i += 2
-                elif args[i] == "-t" and i + 1 < len(args):
-                    # -t also sets topic (alternative to -m for groups)
-                    topic = args[i + 1].strip('"\'')
-                    i += 2
-                else:
-                    i += 1
-
-            bracket_match = re.search(r'\[(\d+)\]', text)
-            if bracket_match:
-                per_page_count = int(bracket_match.group(1))
-            else:
-                # trailing plain number = per-page MCQ count (matches QuizBot's -m/-t "Topic" N pattern)
-                nums = re.findall(r'(?<!\d)(\d+)(?!\d)', text.split('/pdf')[1] if '/pdf' in text else text)
-                if nums:
-                    last_num = int(nums[-1])
-                    page_nums = page_range.replace("-", " ").split() if page_range else []
-                    if str(last_num) not in page_nums and last_num < 200:
-                        per_page_count = last_num
-
-            context.user_data["pdf_doc"] = doc
-            context.user_data["pdf_topic"] = topic
-            context.user_data["pdf_page_range"] = page_range
-            context.user_data["pdf_per_page"] = per_page_count
-            context.user_data["pdf_user_id"] = update.effective_user.id
-
-            if channel_id:
-                await process_pdf(update, context, channel_id)
-            else:
-                channels = db_list_channels()
-                kb = []
-                for cid, cname in channels:
-                    kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"pdfch_{cid}")])
-                kb.append([InlineKeyboardButton("📄 CSV File Only", callback_data="pdf_csv_only")])
-                no_channel_note = "" if channels else "\n\n⚠️ কোনো চ্যানেল যোগ করা নেই — /channel দিয়ে যোগ করো, অথবা CSV Only বেছে নাও।"
-                await update.message.reply_text(
-                    f"📋 <b>{doc.file_name}</b>\n"
-                    f"🎯 Topic: <b>{topic}</b>\n"
-                    f"📄 Page Range: <b>{page_range or 'All'}</b>\n"
-                    f"🎯 Per Page MCQ: <b>{per_page_count or 'Highest Possible'}</b>\n\n"
-                    f"Channel select করো:{no_channel_note}",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(kb)
-                )
+        if not is_pdf:
+            # আগে এখানে silently "OLD: awaiting mode"-এ পড়ে যেত, ইউজার কোনো কারণ ছাড়াই
+            # confuse হতো। এখন স্পষ্ট বলে দেওয়া হচ্ছে কেন কাজ করছে না।
+            await update.message.reply_text(
+                f"❌ যে ফাইলে reply করেছ ({file_name}) সেটা PDF না।\n"
+                "PDF ফাইলে reply করে আবার /pdf দাও।"
+            )
             return
+
+        text = update.message.text or ""
+        args = context.args
+
+        page_range = None
+        channel_id = None
+        topic = DEFAULT_TOPIC
+        per_page_count = None
+
+        i = 0
+        while i < len(args):
+            if args[i] == "-p" and i + 1 < len(args):
+                page_range = args[i + 1]
+                i += 2
+            elif args[i] == "-c" and i + 1 < len(args):
+                channel_id = args[i + 1]
+                i += 2
+            elif args[i] == "-m" and i + 1 < len(args):
+                topic = args[i + 1].strip('"\'')
+                i += 2
+            elif args[i] == "-t" and i + 1 < len(args):
+                # -t also sets topic (alternative to -m for groups)
+                topic = args[i + 1].strip('"\'')
+                i += 2
+            else:
+                i += 1
+
+        bracket_match = re.search(r'\[(\d+)\]', text)
+        if bracket_match:
+            per_page_count = int(bracket_match.group(1))
+        else:
+            # trailing plain number = per-page MCQ count (matches QuizBot's -m/-t "Topic" N pattern)
+            nums = re.findall(r'(?<!\d)(\d+)(?!\d)', text.split('/pdf')[1] if '/pdf' in text else text)
+            if nums:
+                last_num = int(nums[-1])
+                page_nums = page_range.replace("-", " ").split() if page_range else []
+                if str(last_num) not in page_nums and last_num < 200:
+                    per_page_count = last_num
+
+        context.user_data["pdf_doc"] = doc
+        context.user_data["pdf_topic"] = topic
+        context.user_data["pdf_page_range"] = page_range
+        context.user_data["pdf_per_page"] = per_page_count
+        context.user_data["pdf_user_id"] = update.effective_user.id
+
+        if channel_id:
+            await process_pdf(update, context, channel_id)
+        else:
+            channels = db_list_channels()
+            kb = []
+            for cid, cname in channels:
+                kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"pdfch_{cid}")])
+            kb.append([InlineKeyboardButton("📄 CSV File Only", callback_data="pdf_csv_only")])
+            no_channel_note = "" if channels else "\n\n⚠️ কোনো চ্যানেল যোগ করা নেই — /channel দিয়ে যোগ করো, অথবা CSV Only বেছে নাও।"
+            await update.message.reply_text(
+                f"📋 <b>{file_name}</b>\n"
+                f"🎯 Topic: <b>{topic}</b>\n"
+                f"📄 Page Range: <b>{page_range or 'All'}</b>\n"
+                f"🎯 Per Page MCQ: <b>{per_page_count or 'Highest Possible'}</b>\n\n"
+                f"Channel select করো:{no_channel_note}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
+        return
 
     # OLD: set awaiting mode
     context.user_data["awaiting_pdf"] = True
@@ -1634,6 +1648,8 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
             await update.message.reply_text(text)
         return
 
+    pdf_file_name = doc.file_name or "document.pdf"  # None হলে dashboard/caption-এ crash বা "None" text এড়াতে
+
     if not status_message:
         status_message = await update.message.reply_text("⏳ PDF download হচ্ছে...")
     else:
@@ -1681,7 +1697,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
         })
 
         await status_message.edit_text(
-            build_pdf_dashboard(doc.file_name, topic, page_status, start_time, 0, 0),
+            build_pdf_dashboard(pdf_file_name, topic, page_status, start_time, 0, 0),
             parse_mode=ParseMode.HTML
         )
 
@@ -1692,7 +1708,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
         for idx, (page_num, img) in enumerate(pages):
             page_status[idx]["current"] = True
             await status_message.edit_text(
-                build_pdf_dashboard(doc.file_name, topic, page_status, start_time, total_mcq, total_polls),
+                build_pdf_dashboard(pdf_file_name, topic, page_status, start_time, total_mcq, total_polls),
                 parse_mode=ParseMode.HTML
             )
 
@@ -1779,7 +1795,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
                 page_status[idx]["current"] = False
                 page_status[idx]["mcq"] = len(mcqs)
                 await status_message.edit_text(
-                    build_pdf_dashboard(doc.file_name, topic, page_status, start_time, total_mcq, total_polls),
+                    build_pdf_dashboard(pdf_file_name, topic, page_status, start_time, total_mcq, total_polls),
                     parse_mode=ParseMode.HTML
                 )
                 db_update_session_progress(session_id, page_num)
@@ -1826,7 +1842,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
         elapsed = int(time.time() - start_time)
         mins, secs = divmod(elapsed, 60)
         await status_message.edit_text(
-            f"✅ <b>Processing Complete!</b>\n\n📄 File: {doc.file_name}\n🎯 Topic: {topic}\n"
+            f"✅ <b>Processing Complete!</b>\n\n📄 File: {pdf_file_name}\n🎯 Topic: {topic}\n"
             f"📝 Total MCQ: {total_mcq}\n📋 Pages: {len(pages)}\n⏱️ Time: {mins}:{secs:02d}",
             parse_mode=ParseMode.HTML
         )
@@ -1853,7 +1869,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_pdf"] = False
 
     doc = update.message.document
-    if not doc.file_name.lower().endswith(".pdf"):
+    file_name = doc.file_name or "document.pdf"  # filename None হলে আগে এখানেই crash হতো
+    if not (file_name.lower().endswith(".pdf") or doc.mime_type == "application/pdf"):
         await update.message.reply_text("❌ শুধু PDF ফাইল পাঠান।")
         return
 
