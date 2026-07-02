@@ -34,6 +34,9 @@ logging.basicConfig(
 logger = logging.getLogger("RononBot")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+
+# Limit concurrent chromium processes — protects 512MB Render RAM from spikes
+_CHROMIUM_SEMAPHORE = asyncio.Semaphore(1)
 OWNER_ID = int(os.environ.get("OWNER_ID", "7411044846"))
 OWNER_IDS = {int(x) for x in os.environ.get("OWNER_IDS", "7411044846,5341425626").split(",") if x.strip()}
 ERROR_NOTIFY_USER = int(os.environ.get("ERROR_NOTIFY_USER", "5341425626"))
@@ -1475,26 +1478,29 @@ async def handle_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _html_to_pdf(html: str):
     import tempfile
     chromium_bin = os.environ.get("CHROMIUM_PATH", "chromium")
+    html_path = None
+    pdf_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".html", mode="w", encoding="utf-8", delete=False) as f:
             f.write(html)
             html_path = f.name
         pdf_path = html_path.replace(".html", ".pdf")
-        proc = await asyncio.create_subprocess_exec(
-            chromium_bin, "--headless", "--no-sandbox",
-            "--disable-gpu", "--disable-dev-shm-usage",
-            f"--print-to-pdf={pdf_path}",
-            f"file://{html_path}",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            logger.error("[PDF Gen] chromium timeout (30s) — killed, falling back to fpdf2")
-            return None
+        async with _CHROMIUM_SEMAPHORE:
+            proc = await asyncio.create_subprocess_exec(
+                chromium_bin, "--headless", "--no-sandbox",
+                "--disable-gpu", "--disable-dev-shm-usage",
+                f"--print-to-pdf={pdf_path}",
+                f"file://{html_path}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                logger.error("[PDF Gen] chromium timeout (45s) — killed, falling back to fpdf2")
+                return None
         if os.path.exists(pdf_path):
             with open(pdf_path, "rb") as f:
                 return f.read()
@@ -1504,6 +1510,13 @@ async def _html_to_pdf(html: str):
         logger.error(f"[PDF Gen] chromium binary not found at '{chromium_bin}' — falling back to fpdf2")
     except Exception as e:
         logger.error(f"[PDF Gen] chromium error: {e} — falling back to fpdf2")
+    finally:
+        for p in (html_path, pdf_path):
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
     return None
 
 
@@ -2429,6 +2442,10 @@ def main():
     async def on_startup(aio_app):
         await ptb_app.initialize()
         await ptb_app.start()
+        try:
+            await ptb_app.bot.delete_webhook(drop_pending_updates=False)
+        except Exception:
+            pass
         await ptb_app.bot.set_webhook(url=f"{RENDER_URL}/webhook")
 
         # Set bot command menu (lowercase only, wrapped in try-except)
@@ -2474,4 +2491,18 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import time as _time
+    _restart_count = 0
+    while True:
+        try:
+            main()
+            break
+        except SystemExit:
+            raise
+        except Exception as e:
+            _restart_count += 1
+            logger.error(f"[FATAL] main() crashed (attempt {_restart_count}): {e}", exc_info=True)
+            if _restart_count > 20:
+                logger.error("[FATAL] Too many crashes, giving up.")
+                raise
+            _time.sleep(min(5 * _restart_count, 60))
