@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger("RononBot")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-OWNER_ID = 7411044846,5341425626
+OWNER_ID = 5341425626
 DB_PATH = os.environ.get("DB_PATH", "ronon.db")
 
 # ============================================================
