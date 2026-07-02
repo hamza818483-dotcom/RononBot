@@ -1556,18 +1556,10 @@ async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ ডেটা মেয়াদ উত্তীর্ণ। আবার চেষ্টা করুন।")
         return
 
-    if data == "img_csv_pdf":
-        settings = db_get_settings(user_id)
-        watermark = settings.get("watermark") or ""
-
+    if data == "img_csv_only":
         csv_bytes = generate_csv(mcqs)
         csv_buffer = io.BytesIO(csv_bytes)
         csv_buffer.name = f"MCQ_{topic.replace(' ', '_')}.csv"
-
-        pdf_bytes = generate_pdf(mcqs, topic, watermark)
-
-        status_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text="📄 CSV + PDF তৈরি হচ্ছে...")
-
         await context.bot.send_document(
             chat_id=update.effective_chat.id,
             document=csv_buffer,
@@ -1575,7 +1567,12 @@ async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption=f"📄 <b>{topic}</b> — MCQ CSV File\nমোট: {len(mcqs)}টি",
             parse_mode=ParseMode.HTML
         )
+        return
 
+    if data == "img_pdf_only":
+        settings = db_get_settings(user_id)
+        watermark = settings.get("watermark") or ""
+        pdf_bytes = generate_pdf(mcqs, topic, watermark)
         if pdf_bytes:
             pdf_buffer = io.BytesIO(pdf_bytes)
             pdf_buffer.name = f"MCQ_{topic.replace(' ', '_')}.pdf"
@@ -1586,7 +1583,6 @@ async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=f"📑 <b>{topic}</b> — MCQ PDF File\nমোট: {len(mcqs)}টি",
                 parse_mode=ParseMode.HTML
             )
-        await status_msg.edit_text("✅ CSV + PDF পাঠানো হয়েছে।")
         return
 
     if data in ("imgmode_image", "imgmode_topic"):
@@ -1596,7 +1592,8 @@ async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = []
         for cid, cname in channels:
             kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"imgch_{cid}")])
-        kb.append([InlineKeyboardButton("📄 CSV + PDF", callback_data="img_csv_pdf")])
+        kb.append([InlineKeyboardButton("📄 CSV Only", callback_data="img_csv_only")])
+        kb.append([InlineKeyboardButton("📑 PDF Only", callback_data="img_pdf_only")])
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=f"📢 কোন channel-এ পাঠাবে?\n📌 Topic: <b>{topic}</b>",
