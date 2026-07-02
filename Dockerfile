@@ -4,14 +4,16 @@ FROM python:3.11-slim
 # chromium + fonts-noto-bengali needed for /sheet PDF generation (Bengali script render)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
-    chromium \
     fonts-noto \
     fonts-noto-bengali \
     fonts-noto-color-emoji \
+    ca-certificates \
+    && apt-get install -y chromium || apt-get install -y chromium-browser \
     && rm -rf /var/lib/apt/lists/* \
     && fc-cache -f
 
 ENV CHROMIUM_PATH=/usr/bin/chromium
+RUN [ -x /usr/bin/chromium ] || ln -sf /usr/bin/chromium-browser /usr/bin/chromium
 
 WORKDIR /app
 
