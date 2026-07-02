@@ -876,26 +876,32 @@ def parse_page_range(range_str: str, total_pages: int) -> list:
 async def send_mcqs_as_polls(context: ContextTypes.DEFAULT_TYPE, user_id: int, mcqs: list, chat_id: int) -> int:
     sent = 0
     for mcq in mcqs:
-        try:
-            q_text = build_question_text(user_id, mcq.get("question", ""))
-            explanation = build_final_explanation(user_id, mcq.get("explanation", ""))
-            opts = mcq.get("options", [])
-            if len(opts) < 4:
-                logger.warning("Poll send skipped: fewer than 4 options")
-                continue
-            await context.bot.send_poll(
-                chat_id=chat_id,
-                question=q_text,
-                options=opts[:4],
-                type="quiz",
-                correct_option_id=mcq.get("answer_index", 0),
-                explanation=explanation or None,
-                is_anonymous=True,
-            )
+        q_text = build_question_text(user_id, mcq.get("question", ""))
+        explanation = build_final_explanation(user_id, mcq.get("explanation", ""))
+        opts = mcq.get("options", [])
+        if len(opts) < 4:
+            logger.warning("Poll send skipped: fewer than 4 options")
+            continue
+        ok = False
+        for attempt in range(3):
+            try:
+                await context.bot.send_poll(
+                    chat_id=chat_id,
+                    question=q_text,
+                    options=opts[:4],
+                    type="quiz",
+                    correct_option_id=mcq.get("answer_index", 0),
+                    explanation=explanation or None,
+                    is_anonymous=True,
+                )
+                ok = True
+                break
+            except Exception as e:
+                logger.warning(f"Poll send attempt {attempt+1} failed: {e}")
+                await asyncio.sleep(2)
+        if ok:
             sent += 1
-            await asyncio.sleep(0.4)
-        except Exception as e:
-            logger.warning(f"Poll send failed: {e}")
+        await asyncio.sleep(0.4)
     return sent
 
 
