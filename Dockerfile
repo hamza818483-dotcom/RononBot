@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot.py .
 
-# Render persists disk only on paid plans; sqlite file lives in /app (fine for free tier restart-loss)
+# Persistent storage now via Supabase (SUPABASE_URL/SUPABASE_KEY env vars) — sqlite is only an emergency fallback
 ENV DB_PATH=/app/ronon.db
 
 CMD ["python", "bot.py"]

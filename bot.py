@@ -43,9 +43,20 @@ ERROR_NOTIFY_USER = 5341425626
 DEFAULT_TOPIC = "Special MCQ By Ronon"
 
 # ============================================================
-# DATABASE
+# DATABASE (Supabase — persists across Render restarts, unlike SQLite
+# which lived on the ephemeral container disk and got wiped on every
+# redeploy/restart on the free tier. Uses the same SUPABASE_URL/KEY as
+# QuizBot's Render env, with a ronon_ table prefix so nothing collides.)
 # ============================================================
+from supabase import create_client
 
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+sb = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+
+# Local sqlite kept ONLY as an emergency fallback cache if Supabase env vars
+# are missing (so the bot doesn't crash outright) — but the source of truth
+# is Supabase whenever it's configured.
 def db_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -53,6 +64,10 @@ def db_conn():
 
 
 def db_init():
+    if sb:
+        logger.info("[DB] Using Supabase for persistent storage (ronon_* tables)")
+        return
+    logger.warning("[DB] SUPABASE_URL/SUPABASE_KEY not set — falling back to ephemeral SQLite (data WILL be lost on restart)")
     conn = db_conn()
     c = conn.cursor()
     c.execute("""CREATE TABLE IF NOT EXISTS permitted_users (
@@ -74,14 +89,6 @@ def db_init():
         added_by INTEGER,
         added_at TEXT
     )""")
-    try:
-        c.execute("ALTER TABLE api_keys ADD COLUMN used_today INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        c.execute("ALTER TABLE api_keys ADD COLUMN usage_date TEXT DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass
     c.execute("""CREATE TABLE IF NOT EXISTS tags (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
@@ -102,11 +109,6 @@ def db_init():
         current_exp_tag TEXT DEFAULT '',
         watermark TEXT DEFAULT ''
     )""")
-    # migrate watermark column
-    try:
-        c.execute("ALTER TABLE user_settings ADD COLUMN watermark TEXT DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass
     conn.commit()
     conn.close()
 
@@ -114,15 +116,21 @@ def db_init():
 def is_permitted(user_id: int) -> bool:
     if user_id in OWNER_IDS:
         return True
+    if sb:
+        r = sb.table("ronon_permitted_users").select("user_id").eq("user_id", user_id).execute()
+        return len(r.data) > 0
     conn = db_conn()
-    row = conn.execute(
-        "SELECT 1 FROM permitted_users WHERE user_id=?", (user_id,)
-    ).fetchone()
+    row = conn.execute("SELECT 1 FROM permitted_users WHERE user_id=?", (user_id,)).fetchone()
     conn.close()
     return row is not None
 
 
 def db_permit_user(user_id: int):
+    if sb:
+        sb.table("ronon_permitted_users").upsert({
+            "user_id": user_id, "added_at": datetime.utcnow().isoformat()
+        }).execute()
+        return
     conn = db_conn()
     conn.execute(
         "INSERT OR IGNORE INTO permitted_users (user_id, added_at) VALUES (?,?)",
@@ -133,6 +141,9 @@ def db_permit_user(user_id: int):
 
 
 def db_remove_user(user_id: int) -> bool:
+    if sb:
+        r = sb.table("ronon_permitted_users").delete().eq("user_id", user_id).execute()
+        return len(r.data) > 0
     conn = db_conn()
     cur = conn.execute("DELETE FROM permitted_users WHERE user_id=?", (user_id,))
     conn.commit()
@@ -142,6 +153,9 @@ def db_remove_user(user_id: int) -> bool:
 
 
 def db_list_permitted():
+    if sb:
+        r = sb.table("ronon_permitted_users").select("user_id").order("added_at").execute()
+        return [row["user_id"] for row in r.data]
     conn = db_conn()
     rows = conn.execute("SELECT user_id FROM permitted_users ORDER BY added_at").fetchall()
     conn.close()
@@ -149,6 +163,20 @@ def db_list_permitted():
 
 
 def db_add_key(key: str, added_by: int) -> bool:
+    if sb:
+        try:
+            existing = sb.table("ronon_api_keys").select("id").eq("api_key", key).execute()
+            if existing.data:
+                return False
+            sb.table("ronon_api_keys").insert({
+                "api_key": key, "added_by": added_by,
+                "added_at": datetime.utcnow().isoformat(),
+                "active": 1, "used_today": 0, "usage_date": ""
+            }).execute()
+            return True
+        except Exception as e:
+            logger.warning(f"[DB] db_add_key failed: {e}")
+            return False
     conn = db_conn()
     try:
         conn.execute(
@@ -164,10 +192,11 @@ def db_add_key(key: str, added_by: int) -> bool:
 
 
 def db_get_active_keys():
+    if sb:
+        r = sb.table("ronon_api_keys").select("api_key").eq("active", 1).order("id").execute()
+        return [row["api_key"] for row in r.data]
     conn = db_conn()
-    rows = conn.execute(
-        "SELECT api_key FROM api_keys WHERE active=1 ORDER BY id"
-    ).fetchall()
+    rows = conn.execute("SELECT api_key FROM api_keys WHERE active=1 ORDER BY id").fetchall()
     conn.close()
     return [r["api_key"] for r in rows]
 
@@ -177,50 +206,54 @@ def _today_utc_str() -> str:
 
 
 def db_get_all_keys():
-    conn = db_conn()
-    rows = conn.execute(
-        "SELECT id, api_key, active, used_today, usage_date FROM api_keys ORDER BY id"
-    ).fetchall()
-    conn.close()
     today = _today_utc_str()
+    if sb:
+        r = sb.table("ronon_api_keys").select("id,api_key,active,used_today,usage_date").order("id").execute()
+        result = []
+        for row in r.data:
+            used = row["used_today"] if row["usage_date"] == today else 0
+            result.append({"id": row["id"], "api_key": row["api_key"], "active": row["active"], "used_today": used})
+        return result
+    conn = db_conn()
+    rows = conn.execute("SELECT id, api_key, active, used_today, usage_date FROM api_keys ORDER BY id").fetchall()
+    conn.close()
     result = []
     for r in rows:
         used = r["used_today"] if r["usage_date"] == today else 0
-        result.append({
-            "id": r["id"],
-            "api_key": r["api_key"],
-            "active": r["active"],
-            "used_today": used,
-        })
+        result.append({"id": r["id"], "api_key": r["api_key"], "active": r["active"], "used_today": used})
     return result
 
 
 def db_increment_key_usage(key: str):
-    conn = db_conn()
     today = _today_utc_str()
-    row = conn.execute(
-        "SELECT used_today, usage_date FROM api_keys WHERE api_key=?", (key,)
-    ).fetchone()
+    if sb:
+        r = sb.table("ronon_api_keys").select("used_today,usage_date").eq("api_key", key).execute()
+        if not r.data:
+            return
+        row = r.data[0]
+        new_used = (row["used_today"] + 1) if row["usage_date"] == today else 1
+        sb.table("ronon_api_keys").update({"used_today": new_used, "usage_date": today}).eq("api_key", key).execute()
+        return
+    conn = db_conn()
+    row = conn.execute("SELECT used_today, usage_date FROM api_keys WHERE api_key=?", (key,)).fetchone()
     if row is None:
         conn.close()
         return
-    if row["usage_date"] == today:
-        new_used = row["used_today"] + 1
-    else:
-        new_used = 1
-    conn.execute(
-        "UPDATE api_keys SET used_today=?, usage_date=? WHERE api_key=?",
-        (new_used, today, key)
-    )
+    new_used = (row["used_today"] + 1) if row["usage_date"] == today else 1
+    conn.execute("UPDATE api_keys SET used_today=?, usage_date=? WHERE api_key=?", (new_used, today, key))
     conn.commit()
     conn.close()
 
 
 def db_key_usage_today(key: str) -> int:
+    if sb:
+        r = sb.table("ronon_api_keys").select("used_today,usage_date").eq("api_key", key).execute()
+        if not r.data:
+            return 0
+        row = r.data[0]
+        return row["used_today"] if row["usage_date"] == _today_utc_str() else 0
     conn = db_conn()
-    row = conn.execute(
-        "SELECT used_today, usage_date FROM api_keys WHERE api_key=?", (key,)
-    ).fetchone()
+    row = conn.execute("SELECT used_today, usage_date FROM api_keys WHERE api_key=?", (key,)).fetchone()
     conn.close()
     if row is None:
         return 0
@@ -228,6 +261,16 @@ def db_key_usage_today(key: str) -> int:
 
 
 def db_add_channel(channel_id: str, channel_name: str, added_by: int) -> bool:
+    if sb:
+        existing = sb.table("ronon_channels").select("channel_id").eq("channel_id", channel_id).execute()
+        if existing.data:
+            sb.table("ronon_channels").update({"channel_name": channel_name}).eq("channel_id", channel_id).execute()
+            return False
+        sb.table("ronon_channels").insert({
+            "channel_id": channel_id, "channel_name": channel_name,
+            "added_by": added_by, "added_at": datetime.utcnow().isoformat()
+        }).execute()
+        return True
     conn = db_conn()
     try:
         conn.execute(
@@ -237,10 +280,7 @@ def db_add_channel(channel_id: str, channel_name: str, added_by: int) -> bool:
         conn.commit()
         return True
     except sqlite3.IntegrityError:
-        conn.execute(
-            "UPDATE channels SET channel_name=? WHERE channel_id=?",
-            (channel_name, channel_id)
-        )
+        conn.execute("UPDATE channels SET channel_name=? WHERE channel_id=?", (channel_name, channel_id))
         conn.commit()
         return False
     finally:
@@ -248,15 +288,19 @@ def db_add_channel(channel_id: str, channel_name: str, added_by: int) -> bool:
 
 
 def db_list_channels():
+    if sb:
+        r = sb.table("ronon_channels").select("channel_id,channel_name").order("added_at").execute()
+        return [(row["channel_id"], row["channel_name"]) for row in r.data]
     conn = db_conn()
-    rows = conn.execute(
-        "SELECT channel_id, channel_name FROM channels ORDER BY added_at"
-    ).fetchall()
+    rows = conn.execute("SELECT channel_id, channel_name FROM channels ORDER BY added_at").fetchall()
     conn.close()
     return [(r["channel_id"], r["channel_name"]) for r in rows]
 
 
 def db_remove_channel(channel_id: str) -> bool:
+    if sb:
+        r = sb.table("ronon_channels").delete().eq("channel_id", channel_id).execute()
+        return len(r.data) > 0
     conn = db_conn()
     cur = conn.execute("DELETE FROM channels WHERE channel_id=?", (channel_id,))
     conn.commit()
@@ -266,6 +310,11 @@ def db_remove_channel(channel_id: str) -> bool:
 
 
 def db_add_tag(user_id: int, name: str):
+    if sb:
+        sb.table("ronon_tags").insert({
+            "user_id": user_id, "name": name, "created_at": datetime.utcnow().isoformat()
+        }).execute()
+        return
     conn = db_conn()
     conn.execute(
         "INSERT INTO tags (user_id, name, created_at) VALUES (?,?,?)",
@@ -276,35 +325,42 @@ def db_add_tag(user_id: int, name: str):
 
 
 def db_get_settings(user_id: int) -> dict:
+    defaults = {"user_id": user_id, "current_tag": "", "own_explanation": "",
+                "own_explanation_on": 0, "current_exp_tag": "", "watermark": ""}
+    if sb:
+        r = sb.table("ronon_user_settings").select("*").eq("user_id", user_id).execute()
+        if not r.data:
+            sb.table("ronon_user_settings").insert(defaults).execute()
+            return defaults
+        return r.data[0]
     conn = db_conn()
-    row = conn.execute(
-        "SELECT * FROM user_settings WHERE user_id=?", (user_id,)
-    ).fetchone()
+    row = conn.execute("SELECT * FROM user_settings WHERE user_id=?", (user_id,)).fetchone()
     if not row:
-        conn.execute(
-            "INSERT INTO user_settings (user_id) VALUES (?)", (user_id,)
-        )
+        conn.execute("INSERT INTO user_settings (user_id) VALUES (?)", (user_id,))
         conn.commit()
-        row = conn.execute(
-            "SELECT * FROM user_settings WHERE user_id=?", (user_id,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM user_settings WHERE user_id=?", (user_id,)).fetchone()
     conn.close()
     return dict(row)
 
 
 def db_update_settings(user_id: int, **fields):
     db_get_settings(user_id)
+    if sb:
+        sb.table("ronon_user_settings").update(fields).eq("user_id", user_id).execute()
+        return
     conn = db_conn()
     keys = ", ".join(f"{k}=?" for k in fields)
-    conn.execute(
-        f"UPDATE user_settings SET {keys} WHERE user_id=?",
-        (*fields.values(), user_id)
-    )
+    conn.execute(f"UPDATE user_settings SET {keys} WHERE user_id=?", (*fields.values(), user_id))
     conn.commit()
     conn.close()
 
 
 def db_add_exp_tag(user_id: int, name: str):
+    if sb:
+        sb.table("ronon_exp_tags").insert({
+            "user_id": user_id, "name": name, "created_at": datetime.utcnow().isoformat()
+        }).execute()
+        return
     conn = db_conn()
     conn.execute(
         "INSERT INTO exp_tags (user_id, name, created_at) VALUES (?,?,?)",
@@ -315,10 +371,11 @@ def db_add_exp_tag(user_id: int, name: str):
 
 
 def db_get_exp_tags(user_id: int):
+    if sb:
+        r = sb.table("ronon_exp_tags").select("name").eq("user_id", user_id).order("created_at").execute()
+        return [row["name"] for row in r.data]
     conn = db_conn()
-    rows = conn.execute(
-        "SELECT name FROM exp_tags WHERE user_id=? ORDER BY created_at", (user_id,)
-    ).fetchall()
+    rows = conn.execute("SELECT name FROM exp_tags WHERE user_id=? ORDER BY created_at", (user_id,)).fetchall()
     conn.close()
     return [r["name"] for r in rows]
 
