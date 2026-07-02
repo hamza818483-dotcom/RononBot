@@ -1,7 +1,4 @@
-
-# Let me write the complete fixed bot code and save it
-
-bot_code = r'''"""
+"""
 Ronon Bot — Telegram MCQ Bot
 Owner-managed access, Gemini-powered /img /pdf MCQ poll generator,
 per-poll tags + explanations. Webhook mode for Render.
@@ -1599,11 +1596,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-'''
-
-# Save to file
-with open('/mnt/agents/output/bot.py', 'w', encoding='utf-8') as f:
-    f.write(bot_code)
-
-new_lines = bot_code.count('\n') + 1
-print(f"Saved bot.py with {new_lines} lines")
