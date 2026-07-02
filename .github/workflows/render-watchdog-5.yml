@@ -1,19 +1,15 @@
-name: Keep RononBot Alive — Layer 1 (every 5min)
-
-# 4-layer watchdog, staggered offsets (0,1,2,3 min after each 5-min mark)
-# so even if one GH Actions run is delayed/queued, others still cover.
-# Single Render URL (no secondary) — RononBot has one instance.
+name: Keep RononBot Alive — Layer 5 (every 5min, +4min offset)
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # :00, :05, :10, :15...
+    - cron: '4-59/5 * * * *'   # :04, :09, :14...
   workflow_dispatch:
 
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping RononBot (layer 1)
+      - name: Ping RononBot (layer 5)
         id: check
         env:
           RENDER_URL: ${{ secrets.RENONBOT_URL }}
@@ -21,9 +17,9 @@ jobs:
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 --retry 2 \
             "${RENDER_URL}/health" || echo "000")
           echo "RononBot: $STATUS"
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
           if [ "$STATUS" != "200" ]; then
-            echo "::warning::RononBot not responding (layer 1)!"
-            echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+            echo "::warning::RononBot not responding (layer 5)!"
           fi
 
       - name: Alert owners via Telegram if down
@@ -33,12 +29,13 @@ jobs:
           OWNER_IDS: ${{ secrets.OWNER_IDS }}
         run: |
           if [ -z "$BOT_TOKEN" ] || [ -z "$OWNER_IDS" ]; then
+            echo "BOT_TOKEN/OWNER_IDS not set, skipping alert"
             exit 0
           fi
           IFS=',' read -ra IDS <<< "$OWNER_IDS"
           for oid in "${IDS[@]}"; do
             curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
               -d chat_id="${oid}" \
-              -d text="⚠️ RononBot health check failed (status: $STATUS) — Layer 1" \
+              -d text="⚠️ RononBot health check failed (status: ${{ steps.check.outputs.status }}) — Layer 5" \
               || true
           done
