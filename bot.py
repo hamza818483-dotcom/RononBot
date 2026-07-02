@@ -1425,12 +1425,21 @@ async def _html_to_pdf(html: str):
         proc = await asyncio.create_subprocess_exec(
             chromium_bin, "--headless", "--no-sandbox",
             "--disable-gpu", "--disable-dev-shm-usage",
+            "--disable-extensions", "--disable-software-rasterizer",
+            "--single-process", "--no-zygote",
+            "--js-flags=--max-old-space-size=128",
             f"--print-to-pdf={pdf_path}",
             f"file://{html_path}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            logger.error("[PDF Gen] chromium timeout (30s) — killed, falling back to fpdf2")
+            return None
         if os.path.exists(pdf_path):
             with open(pdf_path, "rb") as f:
                 return f.read()
