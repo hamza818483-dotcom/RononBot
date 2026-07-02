@@ -535,7 +535,7 @@ def build_question_text(user_id: int, question: str) -> str:
     settings = db_get_settings(user_id)
     tag = settings.get("current_tag")
     if tag:
-        return f"{tag}\n{question}"[:290]
+        return f"{tag}\n\n{question}"[:290]
     return question[:290]
 
 
