@@ -285,7 +285,7 @@ def db_get_all_keys():
             r = sb.table("ronon_api_keys").select("id,api_key,active,used_today,usage_date").order("id").execute()
             result = []
             for row in r.data:
-                used = row["used_today"] if row["usage_date"] == today else 0
+                used = int(row["used_today"] or 0) if row["usage_date"] == today else 0
                 result.append({"id": row["id"], "api_key": row["api_key"], "active": row["active"], "used_today": used})
             return result
         conn = db_conn()
@@ -293,7 +293,7 @@ def db_get_all_keys():
         conn.close()
         result = []
         for r in rows:
-            used = r["used_today"] if r["usage_date"] == today else 0
+            used = int(r["used_today"] or 0) if r["usage_date"] == today else 0
             result.append({"id": r["id"], "api_key": r["api_key"], "active": r["active"], "used_today": used})
         return result
     except Exception as e:
@@ -309,7 +309,7 @@ def db_increment_key_usage(key: str):
             if not r.data:
                 return
             row = r.data[0]
-            new_used = (row["used_today"] + 1) if row["usage_date"] == today else 1
+            new_used = (int(row["used_today"] or 0) + 1) if row["usage_date"] == today else 1
             sb.table("ronon_api_keys").update({"used_today": new_used, "usage_date": today}).eq("api_key", key).execute()
             return
         conn = db_conn()
@@ -317,7 +317,7 @@ def db_increment_key_usage(key: str):
         if row is None:
             conn.close()
             return
-        new_used = (row["used_today"] + 1) if row["usage_date"] == today else 1
+        new_used = (int(row["used_today"] or 0) + 1) if row["usage_date"] == today else 1
         conn.execute("UPDATE api_keys SET used_today=?, usage_date=? WHERE api_key=?", (new_used, today, key))
         conn.commit()
         conn.close()
@@ -334,13 +334,13 @@ def db_key_usage_today(key: str) -> int:
             if not r.data:
                 return 0
             row = r.data[0]
-            return row["used_today"] if row["usage_date"] == _today_utc_str() else 0
+            return int(row["used_today"] or 0) if row["usage_date"] == _today_utc_str() else 0
         conn = db_conn()
         row = conn.execute("SELECT used_today, usage_date FROM api_keys WHERE api_key=?", (key,)).fetchone()
         conn.close()
         if row is None:
             return 0
-        return row["used_today"] if row["usage_date"] == _today_utc_str() else 0
+        return int(row["used_today"] or 0) if row["usage_date"] == _today_utc_str() else 0
     except Exception as e:
         # error হলে 0 ধরে নেওয়া নিরাপদ (key limit-এ পৌঁছায়নি ধরে নিয়ে ব্যবহার চালিয়ে যাওয়া হয়) —
         # crash হয়ে পুরো MCQ generation থামিয়ে দেওয়ার চেয়ে এটা ভালো ট্রেড-অফ
