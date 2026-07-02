@@ -880,8 +880,9 @@ def parse_page_range(range_str: str, total_pages: int) -> list:
     return sorted(pages) if pages else list(range(1, total_pages + 1))
 
 
-async def send_mcqs_as_polls(context: ContextTypes.DEFAULT_TYPE, user_id: int, mcqs: list, chat_id: int) -> int:
+async def send_mcqs_as_polls(context: ContextTypes.DEFAULT_TYPE, user_id: int, mcqs: list, chat_id: int, return_first_link: bool = False):
     sent = 0
+    first_link = None
     for mcq in mcqs:
         q_text = build_question_text(user_id, mcq.get("question", ""))
         explanation = build_final_explanation(user_id, mcq.get("explanation", ""))
@@ -892,7 +893,7 @@ async def send_mcqs_as_polls(context: ContextTypes.DEFAULT_TYPE, user_id: int, m
         ok = False
         for attempt in range(3):
             try:
-                await context.bot.send_poll(
+                msg = await context.bot.send_poll(
                     chat_id=chat_id,
                     question=q_text,
                     options=opts[:4],
@@ -902,6 +903,8 @@ async def send_mcqs_as_polls(context: ContextTypes.DEFAULT_TYPE, user_id: int, m
                     is_anonymous=True,
                 )
                 ok = True
+                if sent == 0 and str(chat_id).startswith("-100"):
+                    first_link = f"https://t.me/c/{str(chat_id)[4:]}/{msg.message_id}"
                 break
             except Exception as e:
                 logger.warning(f"Poll send attempt {attempt+1} failed: {e}")
@@ -909,7 +912,7 @@ async def send_mcqs_as_polls(context: ContextTypes.DEFAULT_TYPE, user_id: int, m
         if ok:
             sent += 1
         await asyncio.sleep(0.4)
-    return sent
+    return (sent, first_link) if return_first_link else sent
 
 
 # ============================================================
@@ -1457,9 +1460,11 @@ async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(f"⏳ 📢 চ্যানেলে {len(mcqs)}টি poll পাঠানো হচ্ছে...")
 
-        sent = await send_mcqs_as_polls(context, user_id, mcqs, channel_id)
+        sent, first_link = await send_mcqs_as_polls(context, user_id, mcqs, channel_id, return_first_link=True)
 
         end_text = f"✅ MCQ Polls Completed!\n📊 Total: {sent} polls\n🏷️ Topic: {topic}"
+        if first_link:
+            end_text += f"\n🔗 First Poll Link:\n{first_link}"
         await context.bot.send_message(chat_id=channel_id, text=end_text, parse_mode=ParseMode.HTML)
 
         await query.edit_message_text(f"✅ {sent}টি poll চ্যানেলে পাঠানো হয়েছে!")
