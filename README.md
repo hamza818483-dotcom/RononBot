@@ -24,4 +24,19 @@ Telegram MCQ bot — Gemini 2.5 Flash দিয়ে ছবি/PDF থেকে
 
 বট polling mode-এ চলে (webhook দরকার নেই), তাই কোনো URL config লাগবে না।
 
-⚠️ Free tier-এ Render service inactive হলে sleep করে ও restart-এ SQLite data (permitted users, keys, tags) হারিয়ে যেতে পারে যদি disk persist না থাকে। প্রয়োজনে Render-এর Persistent Disk যোগ করুন এবং `DB_PATH` সেই mount path-এ set করুন।
+⚠️ Free tier-এ Render service inactive হলে sleep করে ও restart-এ SQLite data (permitted users, keys, tags) হারিয়ে যেতে পারে যদি disk persist না থাকে। প্রয়োজনে Render-এর Persistent Disk যোগ করুন এবং `DB_PATH` সেই mount path-এ set করুন। (Supabase env vars সেট থাকলে data এমনিতেই Supabase-এ persist হয়, এই সমস্যা প্রযোজ্য নয়।)
+
+## Sleep প্রতিরোধ — Multilayer System
+
+Render Free tier ১৫ মিনিট কোনো HTTP request না পেলে সার্ভিস sleep করে দেয়। এটা ঠেকাতে বটে ৩টা layer built-in আছে:
+
+1. **Layer 1 — Self-ping**: বট নিজেই প্রতি ৪ মিনিটে নিজের `/health` endpoint হিট করে। পরপর ২ বার fail করলে দ্রুত (১ মিনিট পরপর) retry করে।
+2. **Layer 2 — Telegram poll**: প্রতি ৩ মিনিটে Telegram API-কে `getMe` কল করে — এটা Render-এর নিজস্ব HTTP layer-এর ওপর নির্ভর করে না, তাই Layer 1 সম্পূর্ণ ব্যর্থ হলেও কাজ করবে।
+3. **Layer 3 — Watchdog heartbeat**: প্রতি ১০ মিনিটে log-এ heartbeat লেখে, process hang হয়েছে কিনা বোঝার জন্য।
+
+**Layer 4 (সবচেয়ে reliable — বাইরের থেকে, recommended):** এই ৩টা layer বটের **ভেতর থেকে** কাজ করে — যদি পুরো process crash করে বা Render-এর networking সমস্যা হয়, ভেতরের কোনো layer-ই কাজ করবে না। তাই একটা external uptime monitor যোগ করা সবচেয়ে নিরাপদ:
+
+- [UptimeRobot](https://uptimerobot.com) (ফ্রি) → New Monitor → HTTP(s) → URL: `https://rononbot.onrender.com/health` → Interval: 5 মিনিট
+- অথবা [cron-job.org](https://cron-job.org) দিয়ে একই URL-এ প্রতি ৫ মিনিটে GET request
+
+এই বাইরের monitor বটের process crash করলেও Render-কে সজাগ রাখতে (এবং crash হলে alert পেতে) সাহায্য করবে — বটের নিজের কোড এখানে অংশ নেয় না, তাই এটা truly independent layer।

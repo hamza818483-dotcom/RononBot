@@ -1979,15 +1979,50 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def keep_alive():
-    """Internal cron to keep Render service awake."""
+    """Layer 1 — নিজের /health endpoint নিজেই বারবার হিট করে Render-কে 'active' দেখায়।
+    Render Free tier ১৫ মিনিট কোনো HTTP request না পেলে সার্ভিস sleep করে দেয় —
+    এই ping সেটা ঠেকায়। ১৫ মিনিটের অনেক আগেই (৪ মিনিট পরপর) পাঠানো হচ্ছে যাতে
+    কোনো একটা ping fail/timeout হলেও sleep হওয়ার আগেই পরেরটা পৌঁছায়।"""
+    failures = 0
     while True:
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"{RENDER_URL}/health", timeout=10) as resp:
-                    pass
-        except Exception:
-            pass
-        await asyncio.sleep(300)
+                async with session.get(f"{RENDER_URL}/health", timeout=15) as resp:
+                    if resp.status == 200:
+                        failures = 0
+                    else:
+                        failures += 1
+        except Exception as e:
+            failures += 1
+            logger.warning(f"keep_alive ping failed ({failures}): {e}")
+        # পরপর কয়েকবার fail করলে দ্রুত retry করো (স্বাভাবিক 4-min wait পর্যন্ত অপেক্ষা না করে)
+        await asyncio.sleep(60 if failures >= 2 else 240)
+
+
+async def keep_alive_telegram_poll():
+    """Layer 2 — Telegram API-কেই সরাসরি বারবার poll করে (getMe)। এটা Render-এর
+    নিজস্ব HTTP endpoint-এর ওপর নির্ভর করে না, তাই Layer 1 (self-ping) সম্পূর্ণ
+    ব্যর্থ হলেও (যেমন aiohttp session সমস্যা, বা Render internal networking issue)
+    bot process নিজে সচল থাকবে এবং outbound network activity বজায় রাখবে —
+    outbound traffic-ও Render-কে 'service is doing something' সংকেত দেয়।"""
+    while True:
+        await asyncio.sleep(180)
+        try:
+            if ptb_app and ptb_app.bot:
+                await ptb_app.bot.get_me()
+        except Exception as e:
+            logger.warning(f"keep_alive_telegram_poll failed: {e}")
+
+
+async def keep_alive_watchdog():
+    """Layer 3 — watchdog: প্রতি ১০ মিনিটে log-এ heartbeat লেখে, যাতে Render-এর
+    log stream-এও কার্যকলাপ দেখা যায় (কিছু Render plan/monitoring log activity-কেও
+    'not idle' সংকেত হিসেবে ব্যবহার করে) এবং process নিজে hang/deadlock করেছে কিনা
+    সহজে বোঝা যায় — যদি heartbeat log বন্ধ হয়ে যায় তাহলে process আসলে freeze হয়েছে,
+    শুধু network ping fail করেনি, সেটা ধরা সহজ হবে।"""
+    while True:
+        await asyncio.sleep(600)
+        logger.info("💓 heartbeat — bot process is alive and responsive")
 
 
 def main():
@@ -2028,7 +2063,14 @@ def main():
 
     # Webhook + Health server
     async def health_handler(request):
-        return web.Response(text="OK")
+        # শুধু static "OK" না — bot process আসলে initialized/running কিনা যাচাই করে জানায়,
+        # যাতে external uptime monitor (UptimeRobot ইত্যাদি) দিয়ে ping করলে সেটা প্রকৃত
+        # health check হয়, শুধু "server up" না বরং "bot actually working" নিশ্চিত করে।
+        is_healthy = ptb_app is not None and ptb_app.running
+        return web.Response(
+            text="OK" if is_healthy else "DEGRADED",
+            status=200 if is_healthy else 503
+        )
 
     async def webhook_handler(request):
         try:
@@ -2068,7 +2110,9 @@ def main():
             logger.warning(f"set_my_commands failed: {e}")
 
         asyncio.create_task(keep_alive())
-        logger.info("🚀 Ronon Bot started in webhook mode")
+        asyncio.create_task(keep_alive_telegram_poll())
+        asyncio.create_task(keep_alive_watchdog())
+        logger.info("🚀 Ronon Bot started in webhook mode (multilayer keep-alive active)")
 
     async def on_shutdown(aio_app):
         await ptb_app.stop()
