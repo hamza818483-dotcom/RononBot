@@ -1366,6 +1366,48 @@ async def exp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+async def _generate_sheet_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, wait_msg, mcqs: list, topic: str, watermark: str):
+    await wait_msg.edit_text("🎨 Sheet PDF বানানো হচ্ছে...\n[░░░░░░░░░░] 0%")
+
+    async def _progress_ticker():
+        steps = [10, 25, 40, 55, 70, 85, 95]
+        for pct in steps:
+            await asyncio.sleep(3)
+            filled = pct // 10
+            bar = "█" * filled + "░" * (10 - filled)
+            try:
+                await wait_msg.edit_text(f"🎨 Sheet PDF বানানো হচ্ছে...\n[{bar}] {pct}%")
+            except Exception:
+                pass
+
+    ticker = asyncio.create_task(_progress_ticker())
+    try:
+        html_out = _build_solve_sheet_html(topic, 1, mcqs)
+        pdf_bytes = await _html_to_pdf(html_out)
+        if not pdf_bytes:
+            logger.warning("[SHEET] chromium PDF failed, using fpdf2 fallback")
+            pdf_bytes = generate_pdf(mcqs, topic, watermark)
+        ticker.cancel()
+        if not pdf_bytes:
+            await wait_msg.edit_text("❌ PDF generate করতে সমস্যা হয়েছে!")
+            return
+        await wait_msg.edit_text("🎨 Sheet PDF বানানো হচ্ছে...\n[██████████] 100%")
+        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "RONON_Sheet"
+        pdf_buffer = io.BytesIO(pdf_bytes)
+        pdf_buffer.name = f"{safe_title}_sheet.pdf"
+        await context.bot.send_document(
+            chat_id=update.effective_chat.id,
+            document=pdf_buffer,
+            filename=f"{safe_title}_sheet.pdf",
+            caption=f"📖 {topic}\n📝 মোট MCQ: {len(mcqs)}\nRONON"
+        )
+        await wait_msg.delete()
+    except Exception as e:
+        ticker.cancel()
+        logger.error(f"[SHEET] generate error: {e}", exc_info=True)
+        await wait_msg.edit_text(f"❌ Error: {e}")
+
+
 async def handle_plain_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("awaiting_sheet_topic"):
         await handle_reply_text(update, context)
@@ -1384,44 +1426,7 @@ async def handle_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Session expire হয়ে গেছে, আবার /sheet দাও।")
             return
         wait_msg = await update.message.reply_text("🎨 Sheet PDF বানানো হচ্ছে...\n[░░░░░░░░░░] 0%")
-
-        async def _progress_ticker():
-            steps = [10, 25, 40, 55, 70, 85, 95]
-            for pct in steps:
-                await asyncio.sleep(3)
-                filled = pct // 10
-                bar = "█" * filled + "░" * (10 - filled)
-                try:
-                    await wait_msg.edit_text(f"🎨 Sheet PDF বানানো হচ্ছে...\n[{bar}] {pct}%")
-                except Exception:
-                    pass
-
-        ticker = asyncio.create_task(_progress_ticker())
-        try:
-            html_out = _build_solve_sheet_html(topic, 1, mcqs)
-            pdf_bytes = await _html_to_pdf(html_out)
-            if not pdf_bytes:
-                logger.warning("[SHEET] chromium PDF failed, using fpdf2 fallback")
-                pdf_bytes = generate_pdf(mcqs, topic, watermark)
-            ticker.cancel()
-            if not pdf_bytes:
-                await wait_msg.edit_text("❌ PDF generate করতে সমস্যা হয়েছে!")
-                return
-            await wait_msg.edit_text("🎨 Sheet PDF বানানো হচ্ছে...\n[██████████] 100%")
-            safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "RONON_Sheet"
-            pdf_buffer = io.BytesIO(pdf_bytes)
-            pdf_buffer.name = f"{safe_title}_sheet.pdf"
-            await context.bot.send_document(
-                chat_id=update.effective_chat.id,
-                document=pdf_buffer,
-                filename=f"{safe_title}_sheet.pdf",
-                caption=f"📖 {topic}\n📝 মোট MCQ: {len(mcqs)}\nRONON"
-            )
-            await wait_msg.delete()
-        except Exception as e:
-            ticker.cancel()
-            logger.error(f"[SHEET] topic-reply generate error: {e}", exc_info=True)
-            await wait_msg.edit_text(f"❌ Error: {e}")
+        await _generate_sheet_pdf(update, context, wait_msg, mcqs, topic, watermark)
         return
 
     if context.user_data.get("awaiting_exp_tag"):
@@ -1618,6 +1623,12 @@ async def cmd_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         settings = db_get_settings(user_id)
         watermark = settings.get("watermark") or ""
+
+        inline_topic = " ".join(context.args).strip() if context.args else ""
+        if inline_topic:
+            await _generate_sheet_pdf(update, context, wait_msg, mcqs, inline_topic, watermark)
+            return
+
         context.user_data["sheet_mcqs"] = mcqs
         context.user_data["sheet_watermark"] = watermark
         context.user_data["sheet_default_title"] = default_title
@@ -1625,7 +1636,8 @@ async def cmd_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await wait_msg.edit_text(
             f"✅ {len(mcqs)} টি MCQ পাওয়া গেছে!\n\n"
             f"📝 এই Sheet-এর Topic Name কী হবে?\n"
-            f"(reply করে টাইপ করো, খালি পাঠালে ডিফল্ট <b>{default_title}</b> ব্যবহার হবে)",
+            f"(reply করে টাইপ করো, খালি পাঠালে ডিফল্ট <b>{default_title}</b> ব্যবহার হবে)\n\n"
+            f"💡 Tip: পরের বার <code>/sheet TopicName</code> দিলে একবারেই হয়ে যাবে!",
         )
     except Exception as e:
         logger.error(f"cmd_sheet error: {e}", exc_info=True)
