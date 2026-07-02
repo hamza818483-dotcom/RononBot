@@ -225,21 +225,22 @@ def db_list_permitted():
     return [r["user_id"] for r in rows]
 
 
-def db_add_key(key: str, added_by: int) -> bool:
+def db_add_key(key: str, added_by: int) -> tuple:
+    """Returns (success: bool, reason: str) — reason lets caller show real error."""
     if sb:
         try:
             existing = sb.table("ronon_api_keys").select("id").eq("api_key", key).execute()
             if existing.data:
-                return False
+                return False, "duplicate"
             sb.table("ronon_api_keys").insert({
                 "api_key": key, "added_by": added_by,
                 "added_at": datetime.utcnow().isoformat(),
                 "active": 1, "used_today": 0, "usage_date": ""
             }).execute()
-            return True
+            return True, ""
         except Exception as e:
-            logger.warning(f"[DB] db_add_key failed: {e}")
-            return False
+            logger.error(f"[DB] db_add_key failed: {e}")
+            return False, str(e)
     conn = db_conn()
     try:
         conn.execute(
@@ -247,9 +248,12 @@ def db_add_key(key: str, added_by: int) -> bool:
             (key, added_by, datetime.utcnow().isoformat())
         )
         conn.commit()
-        return True
+        return True, ""
     except sqlite3.IntegrityError:
-        return False
+        return False, "duplicate"
+    except Exception as e:
+        logger.error(f"[DB] db_add_key sqlite failed: {e}")
+        return False, str(e)
     finally:
         conn.close()
 
@@ -1036,11 +1040,13 @@ async def cmd_addkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Format: /addkey (gemini api key)")
         return
     key = context.args[0].strip()
-    ok = db_add_key(key, update.effective_user.id)
+    ok, reason = db_add_key(key, update.effective_user.id)
     if ok:
         await update.message.reply_text("✅ API key যোগ হয়েছে। এখন Gemini 2.5 Flash কাজ করবে।")
-    else:
+    elif reason == "duplicate":
         await update.message.reply_text("⚠️ এই key আগে থেকেই আছে।")
+    else:
+        await update.message.reply_text(f"❌ Key সেভ করতে সমস্যা হয়েছে:\n<code>{reason}</code>", parse_mode="HTML")
 
 
 def _mask_key(key: str) -> str:
