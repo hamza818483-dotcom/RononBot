@@ -1,4 +1,7 @@
-"""
+
+# Let me write the complete fixed bot code and save it
+
+bot_code = r'''"""
 Ronon Bot — Telegram MCQ Bot
 Owner-managed access, Gemini-powered /img /pdf MCQ poll generator,
 per-poll tags + explanations. Webhook mode for Render.
@@ -13,7 +16,6 @@ import base64
 import threading
 import csv
 import io
-import time
 from datetime import datetime, timedelta
 from io import BytesIO
 
@@ -44,7 +46,7 @@ ERROR_NOTIFY_USER = 5341425626
 DEFAULT_TOPIC = "Special MCQ By Ronon"
 
 # ============================================================
-# DATABASE (unchanged)
+# DATABASE
 # ============================================================
 
 def db_conn():
@@ -100,8 +102,14 @@ def db_init():
         current_tag TEXT DEFAULT '',
         own_explanation TEXT DEFAULT '',
         own_explanation_on INTEGER DEFAULT 0,
-        current_exp_tag TEXT DEFAULT ''
+        current_exp_tag TEXT DEFAULT '',
+        watermark TEXT DEFAULT ''
     )""")
+    # migrate watermark column
+    try:
+        c.execute("ALTER TABLE user_settings ADD COLUMN watermark TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
 
@@ -429,7 +437,7 @@ def parse_mcq_json(text: str) -> list:
 
 
 # ============================================================
-# UTILITIES
+# UTILITIES — CSV + PDF
 # ============================================================
 
 def build_final_explanation(user_id: int, mcq_explanation: str) -> str:
@@ -469,6 +477,140 @@ def generate_csv(mcqs: list) -> bytes:
             1,
         ])
     return output.getvalue().encode('utf-8-sig')
+
+
+def find_unicode_font():
+    """Find a system TTF font that supports Unicode/Bengali."""
+    paths = [
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+        '/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf',
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+        '/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf',
+        '/usr/share/fonts/truetype/freefont/FreeSans.ttf',
+        '/usr/share/fonts/truetype/ttf-dejavu/DejaVuSans.ttf',
+    ]
+    for p in paths:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def generate_pdf(mcqs: list, topic: str, watermark: str = "") -> bytes:
+    """Generate a PDF matching the ATLAS MCQ style."""
+    try:
+        from fpdf import FPDF
+    except ImportError:
+        logger.error("fpdf2 not installed. Cannot generate PDF.")
+        return b""
+
+    class MCQPDF(FPDF):
+        def header(self):
+            # Watermark / Header banner
+            if self.watermark_text:
+                self.set_fill_color(240, 248, 255)
+                self.rect(0, 0, 210, 18, 'F')
+                self.set_font(self.font_name, 'B', 16)
+                self.set_text_color(0, 102, 204)
+                self.cell(0, 14, f"🚀 {self.watermark_text} —", 0, 1, 'C')
+                self.ln(2)
+            else:
+                self.ln(5)
+
+        def footer(self):
+            self.set_y(-12)
+            self.set_font(self.font_name, '', 9)
+            self.set_text_color(128, 128, 128)
+            self.cell(0, 10, f'Page {self.page_no()} | {topic}', 0, 0, 'C')
+
+    pdf = MCQPDF()
+    pdf.font_name = 'Arial'
+    pdf.watermark_text = watermark
+
+    font_path = find_unicode_font()
+    if font_path:
+        try:
+            pdf.add_font('DejaVu', '', font_path, uni=True)
+            bold_path = font_path.replace('Sans.ttf', 'Sans-Bold.ttf')
+            if not os.path.exists(bold_path):
+                bold_path = font_path
+            pdf.add_font('DejaVu', 'B', bold_path, uni=True)
+            pdf.font_name = 'DejaVu'
+        except Exception as e:
+            logger.warning(f"Could not add Unicode font: {e}")
+
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.add_page()
+
+    # Topic title
+    pdf.set_font(pdf.font_name, 'B', 18)
+    pdf.set_text_color(33, 37, 41)
+    pdf.cell(0, 10, topic, 0, 1, 'C')
+    pdf.line(15, pdf.get_y(), 195, pdf.get_y())
+    pdf.ln(6)
+
+    for i, mcq in enumerate(mcqs, 1):
+        start_y = pdf.get_y()
+        if start_y > 250:
+            pdf.add_page()
+            start_y = pdf.get_y()
+
+        card_h = 52
+        # Check if explanation makes card taller
+        expl = mcq.get("explanation", "")
+        if expl:
+            card_h += 14
+
+        # Card border
+        pdf.set_draw_color(200, 200, 200)
+        pdf.set_line_width(0.3)
+        pdf.rect(12, start_y, 186, card_h, 'D')
+
+        # Question number + text
+        pdf.set_xy(15, start_y + 3)
+        pdf.set_font(pdf.font_name, 'B', 13)
+        pdf.set_text_color(0, 0, 0)
+        q_text = f"{i:02d}.  {mcq['question']}"
+        pdf.multi_cell(180, 7, q_text, 0, 'L')
+
+        pdf.ln(1)
+        current_y = pdf.get_y()
+
+        # Options
+        pdf.set_font(pdf.font_name, '', 12)
+        for j, opt in enumerate(mcq['options']):
+            letter = chr(65 + j)
+            is_correct = (j == mcq['answer_index'])
+
+            if is_correct:
+                # Green highlight for correct answer
+                pdf.set_fill_color(212, 237, 218)
+                pdf.set_text_color(21, 87, 36)
+                pdf.set_draw_color(40, 167, 69)
+                pdf.rect(18, current_y - 1, 170, 7, 'DF')
+                pdf.set_xy(18, current_y)
+                pdf.cell(170, 6, f"({letter})  {opt}   ✓", 0, 1, 'L')
+                pdf.set_text_color(0, 0, 0)
+                pdf.set_draw_color(200, 200, 200)
+            else:
+                pdf.set_xy(18, current_y)
+                pdf.cell(170, 6, f"({letter})  {opt}", 0, 1, 'L')
+            current_y = pdf.get_y()
+
+        # Explanation box
+        if expl:
+            pdf.set_fill_color(230, 240, 255)
+            pdf.set_draw_color(0, 102, 204)
+            pdf.set_text_color(0, 51, 102)
+            pdf.set_font(pdf.font_name, '', 11)
+            pdf.rect(18, current_y + 1, 170, 12, 'DF')
+            pdf.set_xy(20, current_y + 2)
+            pdf.multi_cell(166, 5, f"ব্যাখ্যা: {expl}", 0, 'L')
+            pdf.set_text_color(0, 0, 0)
+            pdf.set_draw_color(200, 200, 200)
+
+        pdf.ln(8)
+
+    return bytes(pdf.output(dest='S'))
 
 
 def parse_page_range(range_str: str, total_pages: int) -> list:
@@ -581,8 +723,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/removechannel (id) — চ্যানেল সরান\n"
             "/tagQ (name) — প্রশ্নের ট্যাগ সেট করুন\n"
             "/exp — Explanation settings\n"
-            "/img — ছবিতে reply করে MCQ বানান\n"
-            "/pdf — PDF-এ reply করে MCQ বানান\n"
+            "/img — ছবি থেকে MCQ বানান\n"
+            "/pdf — PDF থেকে MCQ বানান\n"
+            "/wm — Watermark সেট করুন\n"
             "/ping — Bot status চেক করুন\n"
         )
     else:
@@ -590,8 +733,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📋 <b>Available Commands:</b>\n"
             "/tagQ (name) — প্রশ্নের ট্যাগ সেট করুন\n"
             "/exp — Explanation settings\n"
-            "/img — ছবিতে reply করে MCQ বানান\n"
-            "/pdf — PDF-এ reply করে MCQ বানান\n"
+            "/img — ছবি থেকে MCQ বানান\n"
+            "/pdf — PDF থেকে MCQ বানান\n"
+            "/wm — Watermark সেট করুন\n"
             "/ping — Bot status চেক করুন\n"
         )
 
@@ -789,6 +933,25 @@ async def cmd_tagq(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @require_permit
+async def cmd_wm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        settings = db_get_settings(update.effective_user.id)
+        current = settings.get("watermark") or "(সেট করা নেই)"
+        await update.message.reply_text(
+            f"🎨 <b>Current Watermark:</b> <code>{current}</code>\n\n"
+            f"নতুন watermark সেট করতে: <code>/wm Your Watermark Name</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    name = " ".join(context.args).strip()
+    db_update_settings(update.effective_user.id, watermark=name)
+    await update.message.reply_text(
+        f"✅ Watermark সেট হয়েছে: <b>{name}</b>\nএখন থেকে সব generated PDF-তে এই watermark থাকবে।",
+        parse_mode=ParseMode.HTML
+    )
+
+
+@require_permit
 async def cmd_exp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
         [InlineKeyboardButton("🏷️ Tag Name", callback_data="exp_tagname")],
@@ -908,54 +1071,53 @@ async def handle_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# /img — Reply-based with Channel List + CSV Option
+# /img — Reply-based (new) + Old awaiting mode
 # ============================================================
 
 @require_permit
 async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message or not update.message.reply_to_message.photo:
-        await update.message.reply_text(
-            "📷 একটা ছবিতে reply করে /img (Topic Name) লিখুন।\n"
-            "উদাহরণ: <code>/img Biology Chapter 1</code>",
-            parse_mode=ParseMode.HTML
-        )
+    # NEW: reply-based immediate processing
+    if update.message.reply_to_message and update.message.reply_to_message.photo:
+        topic = " ".join(context.args).strip() if context.args else DEFAULT_TOPIC
+        photo = update.message.reply_to_message.photo[-1]
+
+        wait_msg = await update.message.reply_text("⏳ ছবি থেকে MCQ generate হচ্ছে...")
+        try:
+            file = await context.bot.get_file(photo.file_id)
+            img_bytes = bytes(await file.download_as_bytearray())
+
+            mcqs, error = await gemini_generate_mcq(img_bytes, "image/jpeg")
+            if error or not mcqs:
+                await wait_msg.edit_text(error or "❌ কোনো MCQ বানানো যায়নি।")
+                return
+
+            context.user_data["img_mcqs"] = mcqs
+            context.user_data["img_topic"] = topic
+            context.user_data["img_user_id"] = update.effective_user.id
+
+            await wait_msg.delete()
+
+            channels = db_list_channels()
+            kb = []
+            for cid, cname in channels:
+                kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"imgch_{cid}")])
+            kb.append([InlineKeyboardButton("📄 CSV + PDF", callback_data="img_csv_pdf")])
+
+            await update.message.reply_text(
+                f"✅ <b>{len(mcqs)}</b>টি MCQ তৈরি হয়েছে!\n"
+                f"🎯 Topic: <b>{topic}</b>\n\n"
+                f"কোথায় পাঠাবেন?",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
+        except Exception as e:
+            logger.error(f"cmd_img reply error: {e}", exc_info=True)
+            await wait_msg.edit_text(f"❌ Error: {e}")
         return
 
-    topic = " ".join(context.args).strip() if context.args else DEFAULT_TOPIC
-    photo = update.message.reply_to_message.photo[-1]
-
-    wait_msg = await update.message.reply_text("⏳ ছবি থেকে MCQ generate হচ্ছে...")
-    try:
-        file = await context.bot.get_file(photo.file_id)
-        img_bytes = bytes(await file.download_as_bytearray())
-
-        mcqs, error = await gemini_generate_mcq(img_bytes, "image/jpeg")
-        if error or not mcqs:
-            await wait_msg.edit_text(error or "❌ কোনো MCQ বানানো যায়নি।")
-            return
-
-        context.user_data["img_mcqs"] = mcqs
-        context.user_data["img_topic"] = topic
-        context.user_data["img_user_id"] = update.effective_user.id
-
-        await wait_msg.delete()
-
-        channels = db_list_channels()
-        kb = []
-        for cid, cname in channels:
-            kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"imgch_{cid}")])
-        kb.append([InlineKeyboardButton("📄 CSV File Only", callback_data="img_csv")])
-
-        await update.message.reply_text(
-            f"✅ <b>{len(mcqs)}</b>টি MCQ তৈরি হয়েছে!\n"
-            f"🎯 Topic: <b>{topic}</b>\n\n"
-            f"কোথায় পাঠাবেন?",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
-    except Exception as e:
-        logger.error(f"cmd_img error: {e}", exc_info=True)
-        await wait_msg.edit_text(f"❌ Error: {e}")
+    # OLD: set awaiting mode
+    context.user_data["awaiting_img"] = True
+    await update.message.reply_text("📷 এখন একটা ছবি পাঠান — তা থেকে MCQ poll বানানো হবে।")
 
 
 async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -975,11 +1137,18 @@ async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ ডেটা মেয়াদ উত্তীর্ণ। আবার চেষ্টা করুন।")
         return
 
-    if data == "img_csv":
+    if data == "img_csv_pdf":
+        settings = db_get_settings(user_id)
+        watermark = settings.get("watermark") or ""
+
         csv_bytes = generate_csv(mcqs)
         csv_buffer = io.BytesIO(csv_bytes)
         csv_buffer.name = f"MCQ_{topic.replace(' ', '_')}.csv"
-        await query.edit_message_text("📄 CSV ফাইল তৈরি হচ্ছে...")
+
+        pdf_bytes = generate_pdf(mcqs, topic, watermark)
+
+        await query.edit_message_text("📄 CSV + PDF তৈরি হচ্ছে...")
+
         await context.bot.send_document(
             chat_id=update.effective_chat.id,
             document=csv_buffer,
@@ -987,6 +1156,17 @@ async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption=f"📄 <b>{topic}</b> — MCQ CSV File\nমোট: {len(mcqs)}টি",
             parse_mode=ParseMode.HTML
         )
+
+        if pdf_bytes:
+            pdf_buffer = io.BytesIO(pdf_bytes)
+            pdf_buffer.name = f"MCQ_{topic.replace(' ', '_')}.pdf"
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
+                document=pdf_buffer,
+                filename=f"MCQ_{topic.replace(' ', '_')}.pdf",
+                caption=f"📑 <b>{topic}</b> — MCQ PDF File\nমোট: {len(mcqs)}টি",
+                parse_mode=ParseMode.HTML
+            )
         return
 
     if data.startswith("imgch_"):
@@ -1011,78 +1191,108 @@ async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# /pdf — Reply-based with args parsing
+# OLD Photo handler (backward compat)
+# ============================================================
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_permitted(user_id):
+        return
+    if not context.user_data.get("awaiting_img"):
+        return
+    context.user_data["awaiting_img"] = False
+
+    wait_msg = await update.message.reply_text("⏳ MCQ বানানো হচ্ছে...")
+    try:
+        photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        img_bytes = bytes(await file.download_as_bytearray())
+
+        mcqs, error = await gemini_generate_mcq(img_bytes, "image/jpeg")
+        if error or not mcqs:
+            await wait_msg.edit_text(error or "❌ কোনো MCQ বানানো যায়নি।")
+            return
+
+        await wait_msg.delete()
+        sent = await send_mcqs_as_polls(context, user_id, mcqs, update.effective_chat.id)
+        await update.message.reply_text(f"✅ {sent}টি MCQ poll পাঠানো হয়েছে!")
+    except Exception as e:
+        logger.error(f"handle_photo error: {e}", exc_info=True)
+        await wait_msg.edit_text(f"❌ Error: {e}")
+
+
+# ============================================================
+# /pdf — Reply-based (new) + Old awaiting mode
 # ============================================================
 
 @require_permit
 async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message or not update.message.reply_to_message.document:
-        await update.message.reply_text(
-            "📄 একটা PDF-এ reply করে /pdf command দিন।\n"
-            "Format: <code>/pdf -p 1-5 -c @channel -m \"Topic\" [10]</code>",
-            parse_mode=ParseMode.HTML
-        )
-        return
+    # NEW: reply-based immediate processing
+    if update.message.reply_to_message and update.message.reply_to_message.document:
+        doc = update.message.reply_to_message.document
+        if doc.file_name.lower().endswith(".pdf"):
+            text = update.message.text or ""
+            args = context.args
 
-    doc = update.message.reply_to_message.document
-    if not doc.file_name.lower().endswith(".pdf"):
-        await update.message.reply_text("❌ শুধু PDF ফাইলে reply করুন।")
-        return
+            page_range = None
+            channel_id = None
+            topic = DEFAULT_TOPIC
+            per_page_count = None
 
-    text = update.message.text or ""
-    args = context.args
+            i = 0
+            while i < len(args):
+                if args[i] == "-p" and i + 1 < len(args):
+                    page_range = args[i + 1]
+                    i += 2
+                elif args[i] == "-c" and i + 1 < len(args):
+                    channel_id = args[i + 1]
+                    i += 2
+                elif args[i] == "-m" and i + 1 < len(args):
+                    topic = args[i + 1].strip('"\'')
+                    i += 2
+                elif args[i] == "-t" and i + 1 < len(args):
+                    # -t also sets topic (alternative to -m for groups)
+                    topic = args[i + 1].strip('"\'')
+                    i += 2
+                else:
+                    i += 1
 
-    page_range = None
-    channel_id = None
-    topic = DEFAULT_TOPIC
-    per_page_count = None
+            bracket_match = re.search(r'\[(\d+)\]', text)
+            if bracket_match:
+                per_page_count = int(bracket_match.group(1))
 
-    i = 0
-    while i < len(args):
-        if args[i] == "-p" and i + 1 < len(args):
-            page_range = args[i + 1]
-            i += 2
-        elif args[i] == "-c" and i + 1 < len(args):
-            channel_id = args[i + 1]
-            i += 2
-        elif args[i] == "-m" and i + 1 < len(args):
-            topic = args[i + 1].strip('"\'')
-            i += 2
-        elif args[i] == "-t" and i + 1 < len(args):
-            i += 2
-        else:
-            i += 1
+            context.user_data["pdf_doc"] = doc
+            context.user_data["pdf_topic"] = topic
+            context.user_data["pdf_page_range"] = page_range
+            context.user_data["pdf_per_page"] = per_page_count
+            context.user_data["pdf_user_id"] = update.effective_user.id
 
-    bracket_match = re.search(r'\[(\d+)\]', text)
-    if bracket_match:
-        per_page_count = int(bracket_match.group(1))
+            if channel_id:
+                await process_pdf(update, context, channel_id)
+            else:
+                channels = db_list_channels()
+                if not channels:
+                    await update.message.reply_text("❌ কোনো চ্যানেল যোগ করা নেই। /channel দিয়ে যোগ করুন।")
+                    return
 
-    context.user_data["pdf_doc"] = doc
-    context.user_data["pdf_topic"] = topic
-    context.user_data["pdf_page_range"] = page_range
-    context.user_data["pdf_per_page"] = per_page_count
-    context.user_data["pdf_user_id"] = update.effective_user.id
-
-    if channel_id:
-        await process_pdf(update, context, channel_id)
-    else:
-        channels = db_list_channels()
-        if not channels:
-            await update.message.reply_text("❌ কোনো চ্যানেল যোগ করা নেই। /channel দিয়ে যোগ করুন।")
+                kb = []
+                for cid, cname in channels:
+                    kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"pdfch_{cid}")])
+                kb.append([InlineKeyboardButton("📄 CSV + PDF", callback_data="pdf_csv_pdf")])
+                await update.message.reply_text(
+                    f"📄 PDF: <b>{doc.file_name}</b>\n"
+                    f"🎯 Topic: <b>{topic}</b>\n"
+                    f"📄 Page Range: <b>{page_range or 'All'}</b>\n"
+                    f"🎯 Per Page MCQ: <b>{per_page_count or 'Highest Possible'}</b>\n\n"
+                    f"কোথায় পাঠাবেন?",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(kb)
+                )
             return
 
-        kb = []
-        for cid, cname in channels:
-            kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"pdfch_{cid}")])
-        await update.message.reply_text(
-            f"📄 PDF: <b>{doc.file_name}</b>\n"
-            f"🎯 Topic: <b>{topic}</b>\n"
-            f"📄 Page Range: <b>{page_range or 'All'}</b>\n"
-            f"🎯 Per Page MCQ: <b>{per_page_count or 'Highest Possible'}</b>\n\n"
-            f"কোথায় পাঠাবেন?",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
+    # OLD: set awaiting mode
+    context.user_data["awaiting_pdf"] = True
+    await update.message.reply_text("📄 এখন একটা PDF ফাইল পাঠান — তা থেকে MCQ poll বানানো হবে।")
 
 
 async def pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1098,6 +1308,45 @@ async def pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("pdfch_"):
         channel_id = data[len("pdfch_"):]
         await process_pdf(update, context, channel_id, status_message=query.message)
+        return
+
+    if data == "pdf_csv_pdf":
+        mcqs = context.user_data.get("pdf_mcqs", [])
+        topic = context.user_data.get("pdf_topic", DEFAULT_TOPIC)
+        if not mcqs:
+            await query.edit_message_text("❌ ডেটা মেয়াদ উত্তীর্ণ।")
+            return
+
+        settings = db_get_settings(user_id)
+        watermark = settings.get("watermark") or ""
+
+        csv_bytes = generate_csv(mcqs)
+        csv_buffer = io.BytesIO(csv_bytes)
+        csv_buffer.name = f"MCQ_{topic.replace(' ', '_')}.csv"
+
+        pdf_bytes = generate_pdf(mcqs, topic, watermark)
+
+        await query.edit_message_text("📄 CSV + PDF তৈরি হচ্ছে...")
+
+        await context.bot.send_document(
+            chat_id=update.effective_chat.id,
+            document=csv_buffer,
+            filename=f"MCQ_{topic.replace(' ', '_')}.csv",
+            caption=f"📄 <b>{topic}</b> — MCQ CSV File\nমোট: {len(mcqs)}টি",
+            parse_mode=ParseMode.HTML
+        )
+
+        if pdf_bytes:
+            pdf_buffer = io.BytesIO(pdf_bytes)
+            pdf_buffer.name = f"MCQ_{topic.replace(' ', '_')}.pdf"
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
+                document=pdf_buffer,
+                filename=f"MCQ_{topic.replace(' ', '_')}.pdf",
+                caption=f"📑 <b>{topic}</b> — MCQ PDF File\nমোট: {len(mcqs)}টি",
+                parse_mode=ParseMode.HTML
+            )
+        return
 
 
 async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_id: str, status_message=None):
@@ -1154,6 +1403,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
 
         total_sent = 0
         total_mcqs = 0
+        all_mcqs = []
 
         for page_num in sorted(page_images.keys()):
             img = page_images[page_num]
@@ -1168,6 +1418,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
             if error or not mcqs:
                 continue
 
+            all_mcqs.extend(mcqs)
             total_mcqs += len(mcqs)
             sent = await send_mcqs_as_polls(context, user_id, mcqs, channel_id)
             total_sent += sent
@@ -1177,6 +1428,10 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
         end_text = f"✅ PDF MCQ Polls Completed!\n📊 Total Polls: {total_sent}\n🏷️ Topic: {topic}"
         await context.bot.send_message(chat_id=channel_id, text=end_text, parse_mode=ParseMode.HTML)
 
+        # Store all mcqs for CSV+PDF generation
+        context.user_data["pdf_mcqs"] = all_mcqs
+        context.user_data["pdf_topic"] = topic
+
         await status_message.edit_text(
             f"✅ সর্বমোট {total_sent}টি MCQ poll চ্যানেলে পাঠানো হয়েছে!\n"
             f"📄 {len(page_images)}টি পেজ প্রসেস করা হয়েছে।"
@@ -1185,6 +1440,51 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
     except Exception as e:
         logger.error(f"process_pdf error: {e}", exc_info=True)
         await status_message.edit_text(f"❌ Error: {e}")
+
+
+# ============================================================
+# OLD Document handler (backward compat)
+# ============================================================
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_permitted(user_id):
+        return
+    if not context.user_data.get("awaiting_pdf"):
+        return
+    context.user_data["awaiting_pdf"] = False
+
+    doc = update.message.document
+    if not doc.file_name.lower().endswith(".pdf"):
+        await update.message.reply_text("❌ শুধু PDF ফাইল পাঠান।")
+        return
+
+    wait_msg = await update.message.reply_text("⏳ PDF processing হচ্ছে...")
+    try:
+        file = await context.bot.get_file(doc.file_id)
+        pdf_bytes = bytes(await file.download_as_bytearray())
+
+        from pdf2image import convert_from_bytes
+        images = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=150)
+
+        total_sent = 0
+        for i, img in enumerate(images, 1):
+            await wait_msg.edit_text(f"⏳ Page {i}/{len(images)} প্রসেস হচ্ছে...")
+            buf = BytesIO()
+            img.save(buf, format="JPEG")
+            page_bytes = buf.getvalue()
+
+            mcqs, error = await gemini_generate_mcq(page_bytes, "image/jpeg")
+            if error or not mcqs:
+                continue
+            sent = await send_mcqs_as_polls(context, user_id, mcqs, update.effective_chat.id)
+            total_sent += sent
+
+        await wait_msg.delete()
+        await update.message.reply_text(f"✅ সর্বমোট {total_sent}টি MCQ poll পাঠানো হয়েছে!")
+    except Exception as e:
+        logger.error(f"handle_document error: {e}", exc_info=True)
+        await wait_msg.edit_text(f"❌ Error: {e}")
 
 
 # ============================================================
@@ -1225,12 +1525,15 @@ def main():
     ptb_app.add_handler(CommandHandler("exp", cmd_exp))
     ptb_app.add_handler(CommandHandler("img", cmd_img))
     ptb_app.add_handler(CommandHandler("pdf", cmd_pdf))
+    ptb_app.add_handler(CommandHandler("wm", cmd_wm))
     ptb_app.add_handler(CommandHandler("ping", cmd_ping))
 
     ptb_app.add_handler(CallbackQueryHandler(exp_callback, pattern="^exp_"))
     ptb_app.add_handler(CallbackQueryHandler(channel_callback, pattern="^(chdel_|chadd)"))
     ptb_app.add_handler(CallbackQueryHandler(img_callback, pattern="^img_"))
-    ptb_app.add_handler(CallbackQueryHandler(pdf_callback, pattern="^pdfch_"))
+    ptb_app.add_handler(CallbackQueryHandler(pdf_callback, pattern="^pdfch_|^pdf_csv"))
+    ptb_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    ptb_app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
     ptb_app.add_handler(MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, handle_reply_text))
 
     ptb_app.add_error_handler(error_handler)
@@ -1254,22 +1557,27 @@ def main():
         await ptb_app.start()
         await ptb_app.bot.set_webhook(url=f"{RENDER_URL}/webhook")
 
-        commands = [
-            BotCommand("start", "Start the bot"),
-            BotCommand("permit", "Permit a user (Owner only)"),
-            BotCommand("remove", "Remove a user (Owner only)"),
-            BotCommand("addkey", "Add Gemini API key (Owner only)"),
-            BotCommand("keys", "Check API key status (Owner only)"),
-            BotCommand("channel", "Add a channel (Owner only)"),
-            BotCommand("channellist", "List channels (Owner only)"),
-            BotCommand("removechannel", "Remove a channel (Owner only)"),
-            BotCommand("tagQ", "Set question tag"),
-            BotCommand("exp", "Explanation settings"),
-            BotCommand("img", "Generate MCQ from image reply"),
-            BotCommand("pdf", "Generate MCQ from PDF reply"),
-            BotCommand("ping", "Check bot status"),
-        ]
-        await ptb_app.bot.set_my_commands(commands)
+        # Set bot command menu (lowercase only, wrapped in try-except)
+        try:
+            commands = [
+                BotCommand("start", "Start the bot"),
+                BotCommand("permit", "Permit user (owner)"),
+                BotCommand("remove", "Remove user (owner)"),
+                BotCommand("addkey", "Add Gemini key (owner)"),
+                BotCommand("keys", "Key status (owner)"),
+                BotCommand("channel", "Add channel (owner)"),
+                BotCommand("channellist", "List channels (owner)"),
+                BotCommand("removechannel", "Remove channel (owner)"),
+                BotCommand("tagq", "Set question tag"),
+                BotCommand("exp", "Explanation settings"),
+                BotCommand("img", "MCQ from image"),
+                BotCommand("pdf", "MCQ from PDF"),
+                BotCommand("wm", "Set PDF watermark"),
+                BotCommand("ping", "Check bot status"),
+            ]
+            await ptb_app.bot.set_my_commands(commands)
+        except Exception as e:
+            logger.warning(f"set_my_commands failed: {e}")
 
         asyncio.create_task(keep_alive())
         logger.info("🚀 Ronon Bot started in webhook mode")
@@ -1291,3 +1599,11 @@ def main():
 
 if __name__ == "__main__":
     main()
+'''
+
+# Save to file
+with open('/mnt/agents/output/bot.py', 'w', encoding='utf-8') as f:
+    f.write(bot_code)
+
+new_lines = bot_code.count('\n') + 1
+print(f"Saved bot.py with {new_lines} lines")
