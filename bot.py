@@ -1373,19 +1373,18 @@ async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["img_mcqs"] = mcqs
             context.user_data["img_topic"] = topic
             context.user_data["img_user_id"] = update.effective_user.id
+            context.user_data["img_bytes"] = img_bytes
 
             await wait_msg.delete()
 
-            channels = db_list_channels()
-            kb = []
-            for cid, cname in channels:
-                kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"imgch_{cid}")])
-            kb.append([InlineKeyboardButton("📄 CSV + PDF", callback_data="img_csv_pdf")])
-
+            kb = [
+                [InlineKeyboardButton("🖼️ Image Mode (image সহ channel-এ যাবে)", callback_data="imgmode_image")],
+                [InlineKeyboardButton("📝 Topic Mode (শুধু MCQ Poll)", callback_data="imgmode_topic")],
+            ]
             await update.message.reply_text(
                 f"✅ <b>{len(mcqs)}</b>টি MCQ তৈরি হয়েছে!\n"
                 f"🎯 Topic: <b>{topic}</b>\n\n"
-                f"কোথায় পাঠাবেন?",
+                f"কোন mode-এ পাঠাবে?",
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup(kb)
             )
@@ -1448,12 +1447,42 @@ async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
+    if data in ("imgmode_image", "imgmode_topic"):
+        mode = "image" if data == "imgmode_image" else "topic"
+        context.user_data["img_mode"] = mode
+        channels = db_list_channels()
+        kb = []
+        for cid, cname in channels:
+            kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"imgch_{cid}")])
+        kb.append([InlineKeyboardButton("📄 CSV + PDF", callback_data="img_csv_pdf")])
+        await query.edit_message_text(
+            f"📢 কোন channel-এ পাঠাবে?\n📌 Topic: <b>{topic}</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+        return
+
     if data.startswith("imgch_"):
         channel_id = data[len("imgch_"):]
+        mode = context.user_data.get("img_mode", "topic")
+        img_bytes = context.user_data.get("img_bytes")
+
+        image_msg_id = None
+        if img_bytes:
+            try:
+                caption = f"⌛ATLAS Special MCQ System\n🌟Topic: {topic}\n💎MCQ: {len(mcqs)}"
+                photo_msg = await context.bot.send_photo(chat_id=channel_id, photo=io.BytesIO(img_bytes), caption=caption)
+                if mode == "image":
+                    image_msg_id = photo_msg.message_id
+                else:
+                    await context.bot.delete_message(chat_id=channel_id, message_id=photo_msg.message_id)
+            except Exception as e:
+                logger.warning(f"img photo send/delete failed: {e}")
 
         pre_text = f"🎯 <b>{topic}</b>\n📊 MCQ Polls Starting...\nমোট প্রশ্ন: {len(mcqs)}"
         try:
-            await context.bot.send_message(chat_id=channel_id, text=pre_text, parse_mode=ParseMode.HTML)
+            await context.bot.send_message(chat_id=channel_id, text=pre_text, parse_mode=ParseMode.HTML,
+                                            reply_to_message_id=image_msg_id if image_msg_id else None)
         except Exception as e:
             await query.edit_message_text(f"❌ চ্যানেলে পাঠাতে ব্যর্থ: {e}")
             return
