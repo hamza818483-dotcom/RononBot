@@ -1370,6 +1370,39 @@ async def handle_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text or ""
 
+    if context.user_data.get("awaiting_sheet_topic"):
+        context.user_data["awaiting_sheet_topic"] = False
+        topic = text.strip() or context.user_data.get("sheet_default_title", "Practice Sheet")
+        mcqs = context.user_data.pop("sheet_mcqs", None)
+        watermark = context.user_data.pop("sheet_watermark", "")
+        if not mcqs:
+            await update.message.reply_text("❌ Session expire হয়ে গেছে, আবার /sheet দাও।")
+            return
+        wait_msg = await update.message.reply_text("🎨 Sheet PDF বানানো হচ্ছে...")
+        try:
+            html_out = _build_solve_sheet_html(topic, 1, mcqs)
+            pdf_bytes = await _html_to_pdf(html_out)
+            if not pdf_bytes:
+                logger.warning("[SHEET] chromium PDF failed, using fpdf2 fallback")
+                pdf_bytes = generate_pdf(mcqs, topic, watermark)
+            if not pdf_bytes:
+                await wait_msg.edit_text("❌ PDF generate করতে সমস্যা হয়েছে!")
+                return
+            safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "RONON_Sheet"
+            pdf_buffer = io.BytesIO(pdf_bytes)
+            pdf_buffer.name = f"{safe_title}_sheet.pdf"
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
+                document=pdf_buffer,
+                filename=f"{safe_title}_sheet.pdf",
+                caption=f"📖 {topic}\n📝 মোট MCQ: {len(mcqs)}\nRONON"
+            )
+            await wait_msg.delete()
+        except Exception as e:
+            logger.error(f"[SHEET] topic-reply generate error: {e}", exc_info=True)
+            await wait_msg.edit_text(f"❌ Error: {e}")
+        return
+
     if context.user_data.get("awaiting_exp_tag"):
         context.user_data["awaiting_exp_tag"] = False
         db_add_exp_tag(user_id, text.strip())
@@ -1490,30 +1523,32 @@ def _build_solve_sheet_html(topic: str, page: int, mcqs: list, answers: dict = N
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;600;700;800&display=swap');
 @page{{size:A4;margin:8mm 10mm;}}
 *{{margin:0;padding:0;box-sizing:border-box;}}
-body{{font-family:'Noto Sans Bengali',sans-serif;background:#fff;font-size:12.5px;}}
+body{{font-family:'Noto Sans Bengali',sans-serif;background:#fff;font-size:14px;}}
 .hdr{{text-align:center;padding:10px 14px;background:#1a237e;color:#fff;margin-bottom:12px;border-radius:8px;}}
-.hdr h1{{font-size:18px;font-weight:800;}}
-.hdr .sub{{font-size:12.5px;color:#c5cae9;margin-top:3px;}}
+.hdr h1{{font-size:20px;font-weight:800;}}
+.hdr .sub{{font-size:14px;color:#c5cae9;margin-top:3px;}}
+.hdr .brand{{font-size:12.5px;color:#9fa8da;margin-top:2px;}}
 .grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px;}}
 .card{{background:#fff;border:1.5px solid #c5cae9;border-radius:8px;padding:9px 10px;break-inside:avoid;page-break-inside:avoid;}}
-.qno{{font-size:11.5px;font-weight:800;color:#1a237e;margin-bottom:3px;}}
-.qtxt{{font-size:13.5px;font-weight:700;color:#111;margin-bottom:7px;line-height:1.6;}}
+.qno{{font-size:13px;font-weight:800;color:#1a237e;margin-bottom:3px;}}
+.qtxt{{font-size:15px;font-weight:700;color:#111;margin-bottom:7px;line-height:1.6;}}
 .opts-wrap{{display:flex;flex-direction:column;gap:3px;margin-bottom:7px;}}
-.opt{{font-size:12.5px;color:#333;padding:2px 6px;border-radius:4px;border:1px solid #e0e0e0;line-height:1.5;}}
+.opt{{font-size:14px;color:#333;padding:2px 6px;border-radius:4px;border:1px solid #e0e0e0;line-height:1.5;}}
 .opt.correct{{background:#e8f5e9;border-color:#43a047;color:#1b5e20;font-weight:700;}}
 .opt.wrong{{background:#ffebee;border-color:#e53935;color:#b71c1c;font-weight:600;}}
 .ans-row{{margin-bottom:4px;}}
-.ans-badge{{font-size:11.5px;font-weight:800;color:#1b5e20;background:#f1f8e9;border:1px solid #81c784;border-radius:4px;padding:1px 7px;}}
-.exp-box{{font-size:12px;color:#1a237e;background:#e8eaf6;border-left:3px solid #3949ab;padding:5px 7px;border-radius:0 5px 5px 0;line-height:1.55;}}
-.footer{{text-align:center;font-size:10px;color:#9e9e9e;margin-top:12px;}}
+.ans-badge{{font-size:13px;font-weight:800;color:#1b5e20;background:#f1f8e9;border:1px solid #81c784;border-radius:4px;padding:1px 7px;}}
+.exp-box{{font-size:13.5px;color:#1a237e;background:#e8eaf6;border-left:3px solid #3949ab;padding:5px 7px;border-radius:0 5px 5px 0;line-height:1.55;}}
+.footer{{text-align:center;font-size:11px;color:#9e9e9e;margin-top:12px;font-weight:700;}}
 </style></head>
 <body>
 <div class="hdr">
-  <h1>📋 ATLAS Solve Sheet</h1>
-  <div class="sub">🎯 {topic} &nbsp;|&nbsp; 📄 Page No: {page} &nbsp;|&nbsp; 📝 {len(mcqs)} MCQ</div>
+  <h1>📋 {topic}</h1>
+  <div class="sub">📄 Page No: {page} &nbsp;|&nbsp; 📝 {len(mcqs)} MCQ</div>
+  <div class="brand">Special MCQ by Ronon</div>
 </div>
 <div class="grid">{items}</div>
-<div class="footer">🚀 ATLAS Special MCQ System — Atlascourses.com</div>
+<div class="footer">RONON</div>
 </body></html>"""
 
 
@@ -1558,32 +1593,19 @@ async def cmd_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await wait_msg.edit_text("❌ CSV থেকে কোনো MCQ পাওয়া যায়নি! Format ঠিক আছে কিনা দেখো।")
             return
 
-        await wait_msg.edit_text(f"✅ {len(mcqs)} টি MCQ পাওয়া গেছে!\n🎨 Sheet PDF বানানো হচ্ছে...")
-
+        default_title = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
         user_id = update.effective_user.id
         settings = db_get_settings(user_id)
         watermark = settings.get("watermark") or ""
-        title = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
-        html_out = _build_solve_sheet_html(title, 1, mcqs)
-        pdf_bytes = await _html_to_pdf(html_out)
-        if not pdf_bytes:
-            logger.warning("[SHEET] chromium PDF failed, using fpdf2 fallback")
-            pdf_bytes = generate_pdf(mcqs, title, watermark)
-
-        if not pdf_bytes:
-            await wait_msg.edit_text("❌ PDF generate করতে সমস্যা হয়েছে!")
-            return
-
-        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", title)[:50] or "ATLAS_Sheet"
-        pdf_buffer = io.BytesIO(pdf_bytes)
-        pdf_buffer.name = f"{safe_title}_sheet.pdf"
-        await context.bot.send_document(
-            chat_id=update.effective_chat.id,
-            document=pdf_buffer,
-            filename=f"{safe_title}_sheet.pdf",
-            caption=f"📖 Practice Sheet\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP"
+        context.user_data["sheet_mcqs"] = mcqs
+        context.user_data["sheet_watermark"] = watermark
+        context.user_data["sheet_default_title"] = default_title
+        context.user_data["awaiting_sheet_topic"] = True
+        await wait_msg.edit_text(
+            f"✅ {len(mcqs)} টি MCQ পাওয়া গেছে!\n\n"
+            f"📝 এই Sheet-এর Topic Name কী হবে?\n"
+            f"(reply করে টাইপ করো, খালি পাঠালে ডিফল্ট <b>{default_title}</b> ব্যবহার হবে)",
         )
-        await wait_msg.delete()
     except Exception as e:
         logger.error(f"cmd_sheet error: {e}", exc_info=True)
         await wait_msg.edit_text(f"❌ Error: {e}")
