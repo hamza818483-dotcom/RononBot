@@ -1,19 +1,16 @@
 FROM python:3.11-slim
+WORKDIR /app
 
-# poppler-utils needed for pdf2image
-# chromium + fonts-noto-bengali needed for /sheet PDF generation (Bengali script render)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y \
     poppler-utils \
-    fonts-noto-core \
+    fonts-noto \
     fonts-noto-color-emoji \
-    ca-certificates \
-    && apt-get install -y chromium \
-    && rm -rf /var/lib/apt/lists/* \
-    && fc-cache -f
+    chromium \
+    && rm -rf /var/lib/apt/lists/*
 
 ENV CHROMIUM_PATH=/usr/bin/chromium
-
-WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
