@@ -1378,16 +1378,31 @@ async def handle_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not mcqs:
             await update.message.reply_text("❌ Session expire হয়ে গেছে, আবার /sheet দাও।")
             return
-        wait_msg = await update.message.reply_text("🎨 Sheet PDF বানানো হচ্ছে...")
+        wait_msg = await update.message.reply_text("🎨 Sheet PDF বানানো হচ্ছে...\n[░░░░░░░░░░] 0%")
+
+        async def _progress_ticker():
+            steps = [10, 25, 40, 55, 70, 85, 95]
+            for pct in steps:
+                await asyncio.sleep(3)
+                filled = pct // 10
+                bar = "█" * filled + "░" * (10 - filled)
+                try:
+                    await wait_msg.edit_text(f"🎨 Sheet PDF বানানো হচ্ছে...\n[{bar}] {pct}%")
+                except Exception:
+                    pass
+
+        ticker = asyncio.create_task(_progress_ticker())
         try:
             html_out = _build_solve_sheet_html(topic, 1, mcqs)
             pdf_bytes = await _html_to_pdf(html_out)
             if not pdf_bytes:
                 logger.warning("[SHEET] chromium PDF failed, using fpdf2 fallback")
                 pdf_bytes = generate_pdf(mcqs, topic, watermark)
+            ticker.cancel()
             if not pdf_bytes:
                 await wait_msg.edit_text("❌ PDF generate করতে সমস্যা হয়েছে!")
                 return
+            await wait_msg.edit_text("🎨 Sheet PDF বানানো হচ্ছে...\n[██████████] 100%")
             safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "RONON_Sheet"
             pdf_buffer = io.BytesIO(pdf_bytes)
             pdf_buffer.name = f"{safe_title}_sheet.pdf"
@@ -1399,6 +1414,7 @@ async def handle_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await wait_msg.delete()
         except Exception as e:
+            ticker.cancel()
             logger.error(f"[SHEET] topic-reply generate error: {e}", exc_info=True)
             await wait_msg.edit_text(f"❌ Error: {e}")
         return
