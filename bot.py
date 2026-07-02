@@ -255,13 +255,20 @@ def db_add_key(key: str, added_by: int) -> bool:
 
 
 def db_get_active_keys():
-    if sb:
-        r = sb.table("ronon_api_keys").select("api_key").eq("active", 1).order("id").execute()
-        return [row["api_key"] for row in r.data]
-    conn = db_conn()
-    rows = conn.execute("SELECT api_key FROM api_keys WHERE active=1 ORDER BY id").fetchall()
-    conn.close()
-    return [r["api_key"] for r in rows]
+    try:
+        if sb:
+            r = sb.table("ronon_api_keys").select("api_key").eq("active", 1).order("id").execute()
+            return [row["api_key"] for row in r.data]
+        conn = db_conn()
+        rows = conn.execute("SELECT api_key FROM api_keys WHERE active=1 ORDER BY id").fetchall()
+        conn.close()
+        return [r["api_key"] for r in rows]
+    except Exception as e:
+        # আগে try/except ছিল না — ronon_api_keys টেবিল না থাকলে বা Supabase error হলে
+        # এটা raw exception throw করতো, যেটা /pdf ও /img দুটোতেই MCQ generation-এর
+        # সবচেয়ে গুরুত্বপূর্ণ ধাপে (key বাছাই) crash করাতো, silently।
+        logger.error(f"[DB] get_active_keys error: {e}")
+        return []
 
 
 def _today_utc_str() -> str:
@@ -270,57 +277,72 @@ def _today_utc_str() -> str:
 
 def db_get_all_keys():
     today = _today_utc_str()
-    if sb:
-        r = sb.table("ronon_api_keys").select("id,api_key,active,used_today,usage_date").order("id").execute()
+    try:
+        if sb:
+            r = sb.table("ronon_api_keys").select("id,api_key,active,used_today,usage_date").order("id").execute()
+            result = []
+            for row in r.data:
+                used = row["used_today"] if row["usage_date"] == today else 0
+                result.append({"id": row["id"], "api_key": row["api_key"], "active": row["active"], "used_today": used})
+            return result
+        conn = db_conn()
+        rows = conn.execute("SELECT id, api_key, active, used_today, usage_date FROM api_keys ORDER BY id").fetchall()
+        conn.close()
         result = []
-        for row in r.data:
-            used = row["used_today"] if row["usage_date"] == today else 0
-            result.append({"id": row["id"], "api_key": row["api_key"], "active": row["active"], "used_today": used})
+        for r in rows:
+            used = r["used_today"] if r["usage_date"] == today else 0
+            result.append({"id": r["id"], "api_key": r["api_key"], "active": r["active"], "used_today": used})
         return result
-    conn = db_conn()
-    rows = conn.execute("SELECT id, api_key, active, used_today, usage_date FROM api_keys ORDER BY id").fetchall()
-    conn.close()
-    result = []
-    for r in rows:
-        used = r["used_today"] if r["usage_date"] == today else 0
-        result.append({"id": r["id"], "api_key": r["api_key"], "active": r["active"], "used_today": used})
-    return result
+    except Exception as e:
+        logger.error(f"[DB] get_all_keys error: {e}")
+        return []
 
 
 def db_increment_key_usage(key: str):
     today = _today_utc_str()
-    if sb:
-        r = sb.table("ronon_api_keys").select("used_today,usage_date").eq("api_key", key).execute()
-        if not r.data:
+    try:
+        if sb:
+            r = sb.table("ronon_api_keys").select("used_today,usage_date").eq("api_key", key).execute()
+            if not r.data:
+                return
+            row = r.data[0]
+            new_used = (row["used_today"] + 1) if row["usage_date"] == today else 1
+            sb.table("ronon_api_keys").update({"used_today": new_used, "usage_date": today}).eq("api_key", key).execute()
             return
-        row = r.data[0]
+        conn = db_conn()
+        row = conn.execute("SELECT used_today, usage_date FROM api_keys WHERE api_key=?", (key,)).fetchone()
+        if row is None:
+            conn.close()
+            return
         new_used = (row["used_today"] + 1) if row["usage_date"] == today else 1
-        sb.table("ronon_api_keys").update({"used_today": new_used, "usage_date": today}).eq("api_key", key).execute()
-        return
-    conn = db_conn()
-    row = conn.execute("SELECT used_today, usage_date FROM api_keys WHERE api_key=?", (key,)).fetchone()
-    if row is None:
+        conn.execute("UPDATE api_keys SET used_today=?, usage_date=? WHERE api_key=?", (new_used, today, key))
+        conn.commit()
         conn.close()
-        return
-    new_used = (row["used_today"] + 1) if row["usage_date"] == today else 1
-    conn.execute("UPDATE api_keys SET used_today=?, usage_date=? WHERE api_key=?", (new_used, today, key))
-    conn.commit()
-    conn.close()
+    except Exception as e:
+        # usage-count আপডেট fail হলেও MCQ generation নিজে যেন থেমে না যায় — শুধু log রাখা হচ্ছে,
+        # কারণ এই ফাংশন MCQ পাঠানোর পরে কল হয়, তাই raise করলে ইতিমধ্যে-সফল কাজটাও ভেঙে যেত
+        logger.error(f"[DB] increment_key_usage error: {e}")
 
 
 def db_key_usage_today(key: str) -> int:
-    if sb:
-        r = sb.table("ronon_api_keys").select("used_today,usage_date").eq("api_key", key).execute()
-        if not r.data:
+    try:
+        if sb:
+            r = sb.table("ronon_api_keys").select("used_today,usage_date").eq("api_key", key).execute()
+            if not r.data:
+                return 0
+            row = r.data[0]
+            return row["used_today"] if row["usage_date"] == _today_utc_str() else 0
+        conn = db_conn()
+        row = conn.execute("SELECT used_today, usage_date FROM api_keys WHERE api_key=?", (key,)).fetchone()
+        conn.close()
+        if row is None:
             return 0
-        row = r.data[0]
         return row["used_today"] if row["usage_date"] == _today_utc_str() else 0
-    conn = db_conn()
-    row = conn.execute("SELECT used_today, usage_date FROM api_keys WHERE api_key=?", (key,)).fetchone()
-    conn.close()
-    if row is None:
+    except Exception as e:
+        # error হলে 0 ধরে নেওয়া নিরাপদ (key limit-এ পৌঁছায়নি ধরে নিয়ে ব্যবহার চালিয়ে যাওয়া হয়) —
+        # crash হয়ে পুরো MCQ generation থামিয়ে দেওয়ার চেয়ে এটা ভালো ট্রেড-অফ
+        logger.error(f"[DB] key_usage_today error: {e}")
         return 0
-    return row["used_today"] if row["usage_date"] == _today_utc_str() else 0
 
 
 def db_add_channel(channel_id: str, channel_name: str, added_by: int) -> bool:
