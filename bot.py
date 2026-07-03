@@ -595,6 +595,13 @@ MCQ_PROMPT_EXISTING_ONLY = """📝 Special MCQ TYPE: EXISTING EXTRACTION ONLY (S
 -বাংলা উদ্দীপক/passage থাকলে, সেই উদ্দীপক টেক্সট "uddipok" ফিল্ডে বসাবে; একই উদ্দীপকের সব MCQ-তে হুবহু একই টেক্সট থাকবে
 -উদ্দীপক না থাকলে "uddipok" ফিল্ড "" রাখবে
 
+🟪🟪🟪 INTERNAL SELF-VERIFICATION PROCESS (MUST FOLLOW — answer দেওয়ার আগে নিজে নিজে করবে) 🟪🟪🟪
+তুমি একবার scan করেই থেমে যাবে না। Final answer দেওয়ার আগে অবশ্যই এই ধাপগুলো নিজে নিজে (internally, output-এ না দেখিয়ে) করবে:
+-Pass 1: পুরো page টা top থেকে bottom, left থেকে right স্ক্যান করে সব readymade MCQ-এর একটা draft লিস্ট বানাও — কোনায়, ছোট ফন্টে, বা বক্সের বাইরে থাকা MCQ সহ।
+-Pass 2: আবার পুরো page টা নতুন করে স্ক্যান করো, এবার শুধু checking mindset নিয়ে — Pass 1-এ কোনো MCQ কি বাদ পড়ে গেছে? বিশেষ করে page-এর একদম উপরে/নিচে, কোণায়, অথবা অন্য MCQ-এর সাথে খুব কাছাকাছি/মিশে থাকা MCQ থাকলে সেগুলো দ্বিতীয়বার খুঁজে বের করো।
+-Pass 3: Draft লিস্টের প্রতিটা MCQ-এর জন্য verify করো যে সঠিক উত্তরটা সত্যিই সোর্স থেকে নেওয়া হয়েছে (অনুমান না), এবং প্রশ্ন+৪টা option হুবহু সোর্স টেক্সট মেলে কিনা।
+-শুধুমাত্র এই ৩টা internal pass শেষ হওয়ার পরেই final JSON output দিবে। যদি Pass 2-এ নতুন কোনো MCQ পাওয়া যায় যেটা Pass 1-এ ছিল না, সেটাও অবশ্যই final লিস্টে যোগ করতে হবে।
+
 Topic: {topic}
 Page: {page}
 
@@ -681,7 +688,8 @@ async def _extract_existing_mcqs_merged(prompt: str, image_bytes: bytes, mime_ty
     অন্য attempt-এ সেই MCQ ধরা পড়লে সেটা ফাইনাল লিস্টে থাকবে। একই MCQ (question টেক্সট
     মিললে) duplicate হিসেবে বাদ দেওয়া হয়।
     """
-    NUM_ATTEMPTS = 3  # প্রতি page-এ ৩টা independent extraction pass, তারপর union
+    NUM_ATTEMPTS = 2  # প্রতি page-এ 2 টা independent extraction pass (প্রতিটা call নিজেই internally
+                      # multi-pass self-verify করে, prompt দেখো), তারপর দুই call-এর result union
     last_err = None
     merged: dict = {}  # normalized_question -> mcq dict
     any_success = False
