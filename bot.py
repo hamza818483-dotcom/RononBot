@@ -578,6 +578,7 @@ MCQ_PROMPT_EXISTING_ONLY = """📝 Special MCQ TYPE: EXISTING EXTRACTION ONLY (S
 -তুমি কক্ষনো নিজে থেকে নতুন কোনো MCQ বানাবে না, কোনো তথ্য/লাইন/প্যারাগ্রাফ থেকে নতুন প্রশ্ন তৈরি করবে না — এমনকি page-এ MCQ বানানোর মতো ভালো তথ্য থাকলেও না।
 -যদি এই page-এ কোনো readymade MCQ না থাকে (শুধু প্লেইন টেক্সট/তথ্য/প্যারাগ্রাফ থাকে, কোনো "প্রশ্ন+option+উত্তর" স্ট্রাকচার নাই), তাহলে অবশ্যই empty JSON array [] রিটার্ন করবে। কোনো MCQ বানিয়ে দিবে না।
 -এই page-এ থাকা প্রতিটি readymade MCQ MUST তুলে আনতে হবে — একটাও miss/skip করা যাবে না। খুব ছোট, অস্পষ্ট, বা কোণায় থাকা MCQ-ও বাদ দেওয়া যাবে না।
+-OUTPUT ORDER: page-এ MCQ যে সিরিয়ালে/ক্রমে আছে (উপর থেকে নিচে, বাম থেকে ডান), output JSON array-ও ঠিক সেই একই ক্রমে দিবে — প্রতিটা MCQ-এর সাথে তার নিজের ৪টা option ঠিক একইভাবে (একই ক্রমে, একই ম্যাচিং সহ) বেঁধে রাখবে, কোনো MCQ-এর option অন্য MCQ-এর সাথে মিক্স হবে না।
 -কোনো নির্দিষ্ট সংখ্যক MCQ বানানোর/নেওয়ার লিমিট নাই — page-এ যতগুলো readymade MCQ থাকে, ALL/সবগুলোই extract করতে হবে, কোনো একটাও বাদ দিয়ে অল্প কিছু দেওয়া চলবে না।
 -MCQ-এর প্রশ্ন ও ৪টি option হুবহু সোর্সের টেক্সট অনুযায়ী রাখবে — rewrite/paraphrase/summarize করবে না, শুধু accurately extract করবে (শুধু নম্বরিং প্রিফিক্স যেমন ১./Q1./ক. রিমুভ করবে)।
 -টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা,সেকশনের নাম,"Card 1"/"Card 2" এর মতো navigation/label টেক্সট কখনো MCQ হিসেবে extract করবে না।
@@ -723,10 +724,13 @@ async def _extract_existing_mcqs_merged(prompt: str, image_bytes: bytes, mime_ty
     অন্য attempt-এ সেই MCQ ধরা পড়লে সেটা ফাইনাল লিস্টে থাকবে। একই MCQ (question টেক্সট
     মিললে) duplicate হিসেবে বাদ দেওয়া হয়।
     """
-    NUM_ATTEMPTS = 2  # প্রতি page-এ 2 টা independent extraction pass (প্রতিটা call নিজেই internally
-                      # multi-pass self-verify করে, prompt দেখো), তারপর দুই call-এর result union
+    NUM_ATTEMPTS = 3  # প্রতি page-এ 3 টা independent extraction pass (প্রতিটা call নিজেই internally
+                      # multi-pass self-verify করে, prompt দেখো), তারপর সবগুলো call-এর result union —
+                      # কোনো একটা attempt-এ ধরা পড়া MCQ যেকোনো একবার এলেই final লিস্টে থাকবে,
+                      # তাই ৩টা attempt মিলিয়ে coverage সবচেয়ে বেশি হয়।
     last_err = None
     merged: dict = {}  # normalized_question -> mcq dict
+    merge_order: list = []  # normalized_question keys, first-seen order (page-এর serial বজায় রাখতে)
     any_success = False
 
     def _pick_keys():
@@ -782,6 +786,7 @@ async def _extract_existing_mcqs_merged(prompt: str, image_bytes: bytes, mime_ty
                             continue
                         if key_q not in merged:
                             merged[key_q] = m
+                            merge_order.append(key_q)
                     break  # এই attempt-এর জন্য key খোঁজা শেষ, পরের attempt-এ যাও
                 last_err = "Unparseable response"
             except Exception as e:
@@ -793,7 +798,9 @@ async def _extract_existing_mcqs_merged(prompt: str, image_bytes: bytes, mime_ty
             logger.info(f"[existing_only] Page {page}: attempt {attempt} produced nothing usable ({last_err})")
 
     if merged:
-        return list(merged.values()), None
+        # merge_order = প্রথম যে attempt-এ যে ক্রমে MCQ পাওয়া গেছে সেই ক্রম — এটাই page-এর
+        # আসল serial order-এর সবচেয়ে কাছের approximation, তাই এই ক্রমেই ফেরত দেওয়া হয়
+        return [merged[k] for k in merge_order], None
 
     if any_success:
         # সবগুলো attempt সফলভাবে চলেছে এবং প্রতিটাই [] দিয়েছে — মানে সত্যিই এই page-এ
