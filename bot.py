@@ -515,11 +515,15 @@ MCQ_PROMPT_WITH_COUNT = """📝 Special MCQ TYPE: Standard Easy
 💥উত্তর: A/B/C/D — MUST be distributed across different options. STRICTLY FORBIDDEN: all answers being "A" or same option. Each MCQ's correct answer MUST be placed at a different position (A, B, C, or D) — vary them naturally across questions.
 💥ব্যাখ্যা: max 200 chars, source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)
 
+🟨 উদ্দীপক RULE (শুধু বাংলা উদ্দীপকযুক্ত প্রশ্নে):
+-বাংলা উদ্দীপক/passage থাকলে (যেখানে নিচে একাধিক MCQ থাকে), সেই উদ্দীপক টেক্সট "uddipok" ফিল্ডে বসাবে; একই উদ্দীপকের সব MCQ-তে হুবহু একই টেক্সট থাকবে যাতে গ্রুপ করা যায়
+-উদ্দীপক ছাড়া সাধারণ MCQ-তে "uddipok" ফিল্ড "" রাখবে
+
 Topic: {topic}
 Page: {page}
 
 MUST Return ONLY valid JSON array, no markdown:
-[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"..."}}]"""
+[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"...","uddipok":""}}]"""
 
 MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 
@@ -550,11 +554,15 @@ MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 💥উত্তর: A/B/C/D — MUST be distributed across different options. STRICTLY FORBIDDEN: all answers being "A" or same option. Each MCQ's correct answer MUST be placed at a different position — vary them naturally so answers are spread across A, B, C, D positions.
 💥ব্যাখ্যা: max 200 chars, source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)
 
+🟨 উদ্দীপক RULE (শুধু বাংলা উদ্দীপকযুক্ত প্রশ্নে):
+-বাংলা উদ্দীপক/passage থাকলে (যেখানে নিচে একাধিক MCQ থাকে), সেই উদ্দীপক টেক্সট "uddipok" ফিল্ডে বসাবে; একই উদ্দীপকের সব MCQ-তে হুবহু একই টেক্সট থাকবে যাতে গ্রুপ করা যায়
+-উদ্দীপক ছাড়া সাধারণ MCQ-তে "uddipok" ফিল্ড "" রাখবে
+
 Topic: {topic}
 Page: {page}
 
 MUST Return ONLY valid JSON array, no markdown:
-[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"C","explanation":"..."}}]"""
+[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"C","explanation":"...","uddipok":""}}]"""
 
 
 async def gemini_generate_mcq(image_bytes: bytes, mime_type: str = "image/jpeg", count: int = None,
@@ -655,6 +663,7 @@ def parse_mcq_json(text: str) -> list:
                 "options": opts,
                 "answer_index": ans_idx,
                 "explanation": str(m.get("explanation", "")).strip(),
+                "uddipok": str(m.get("uddipok", "")).strip(),
             })
         except Exception as e:
             logger.warning(f"parse_mcq_json: skipped malformed item: {e}")
@@ -929,6 +938,9 @@ async def send_mcqs_as_polls(context: ContextTypes.DEFAULT_TYPE, user_id: int, m
     start_time = time.monotonic()
     last_edit = 0.0
 
+    last_uddipok_text = None
+    uddipok_msg_id = None
+
     for i, mcq in enumerate(mcqs):
         q_text = build_question_text(user_id, mcq.get("question", ""))
         explanation = build_final_explanation(user_id, mcq.get("explanation", ""))
@@ -936,6 +948,29 @@ async def send_mcqs_as_polls(context: ContextTypes.DEFAULT_TYPE, user_id: int, m
         if len(opts) < 4:
             logger.warning("Poll send skipped: fewer than 4 options")
             continue
+
+        # উদ্দীপক গ্রুপিং: নতুন উদ্দীপক পেলে সেটা আগে টেক্সট মেসেজ হিসেবে পাঠাবে,
+        # এবং সেই গ্রুপের সব poll সেই মেসেজকে reply করবে।
+        uddipok_text = mcq.get("uddipok", "")
+        poll_reply_target = reply_to_message_id
+        if uddipok_text:
+            if uddipok_text != last_uddipok_text:
+                try:
+                    udd_msg = await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"📖 <b>উদ্দীপক</b>\n\n{uddipok_text}",
+                        parse_mode=ParseMode.HTML,
+                        reply_to_message_id=reply_to_message_id,
+                    )
+                    uddipok_msg_id = udd_msg.message_id
+                    last_uddipok_text = uddipok_text
+                except Exception as e:
+                    logger.warning(f"Uddipok send failed: {e}")
+                    uddipok_msg_id = None
+            poll_reply_target = uddipok_msg_id if uddipok_msg_id else reply_to_message_id
+        else:
+            last_uddipok_text = None
+
         ok = False
         for attempt in range(3):
             try:
@@ -947,7 +982,7 @@ async def send_mcqs_as_polls(context: ContextTypes.DEFAULT_TYPE, user_id: int, m
                     correct_option_id=mcq.get("answer_index", 0),
                     explanation=explanation or None,
                     is_anonymous=True,
-                    reply_to_message_id=reply_to_message_id,
+                    reply_to_message_id=poll_reply_target,
                 )
                 ok = True
                 if sent == 0 and str(chat_id).startswith("-100"):
