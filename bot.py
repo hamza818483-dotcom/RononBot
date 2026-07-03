@@ -1336,8 +1336,23 @@ async def cmd_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
     else:
-        channel_id = context.args[0].strip()
+        first = context.args[0].strip()
         channel_name = " ".join(context.args[1:]).strip()
+        if first.lstrip("-").isdigit():
+            channel_id = first
+        else:
+            username = first.lstrip("@")
+            try:
+                chat = await context.bot.get_chat(f"@{username}")
+                channel_id = str(chat.id)
+                if not channel_name:
+                    channel_name = chat.title or username
+            except Exception:
+                await update.message.reply_text(
+                    "❌ এই username থেকে channel resolve করা গেল না। বট চ্যানেলে admin আছে কিনা চেক করো, "
+                    "অথবা সঠিক channel id দিয়ে দাও: /channel (id) (name)"
+                )
+                return
 
     added = db_add_channel(channel_id, channel_name, update.effective_user.id)
     warn = "" if sb else "\n\n⚠️ <b>SUPABASE_URL/SUPABASE_KEY সেট নেই — এই ডেটা restart এ মুছে যাবে!</b> Render env vars এ যোগ করো।"
