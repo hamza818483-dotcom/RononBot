@@ -1,0 +1,23 @@
+name: Keep RononBot Alive — Layer 2 (every 5min, +1min offset)
+
+on:
+  schedule:
+    - cron: '1-59/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping RononBot (layer 2)
+        id: check
+        env:
+          RENDER_URL: ${{ secrets.RENONBOT_URL }}
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 --retry 2 \
+            "${RENDER_URL}/health" || echo "000")
+          echo "RononBot: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "::warning::RononBot not responding (layer 2)!"
+            echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          fi
