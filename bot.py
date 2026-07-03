@@ -742,7 +742,7 @@ def find_unicode_font():
 
 
 def generate_pdf(mcqs: list, topic: str, watermark: str = "") -> bytes:
-    """Generate a PDF matching the ATLAS MCQ style."""
+    """Generate a PDF matching the RONON MCQ style."""
     try:
         from fpdf import FPDF
     except ImportError:
@@ -1662,7 +1662,7 @@ async def _html_to_pdf(html: str):
 
 
 def _build_solve_sheet_html(topic: str, page: int, mcqs: list, answers: dict = None) -> str:
-    """Same 2-col boxed ATLAS Solve Sheet HTML as QuizBot /sheet — 100% style match."""
+    """Same 2-col boxed RONON Solve Sheet HTML as QuizBot /sheet — 100% style match."""
     answers = answers or {}
     labels = ["A", "B", "C", "D"]
     items = ""
@@ -1927,7 +1927,7 @@ async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         image_msg_id = None
         if img_bytes:
             try:
-                caption = f"⌛ATLAS Special MCQ System\n🌟Topic: {topic}\n💎MCQ: {len(mcqs)}"
+                caption = f"⌛RONON Special MCQ System\n🌟Topic: {topic}\n💎MCQ: {len(mcqs)}"
                 photo_msg = await context.bot.send_photo(chat_id=channel_id, photo=io.BytesIO(img_bytes), caption=caption)
                 if mode == "image":
                     image_msg_id = photo_msg.message_id
