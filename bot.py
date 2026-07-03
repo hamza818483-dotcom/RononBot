@@ -613,10 +613,13 @@ async def gemini_generate_mcq(image_bytes: bytes, mime_type: str = "image/jpeg",
 
     if existing_only:
         # Existing MCQ mode: শুধু page-এ readymade থাকা MCQ extract করবে, নতুন বানাবে না।
-        # Gemini প্রথমবার miss করে ফেলতে পারে (existing MCQ থাকা সত্ত্বেও কম/০ রিটার্ন),
-        # তাই এই mode-এ retry করা হবে যাতে সত্যিকারের existing MCQ miss না হয়।
+        # Gemini প্রথমবার সব MCQ ধরতে পারে না অনেক সময় (partial miss — page-এ ১০টা থাকলে ৭টা
+        # দিয়ে দেয়, যেটা success response হিসেবে দেখতে খালি চোখে ঠিকই মনে হয়)। তাই এই mode-এ
+        # কখনো এক attempt-এর উপর ভরসা করা হয় না — সবসময় একাধিক independent attempt চালিয়ে
+        # সব attempt-এর result একসাথে merge (union) করে দেওয়া হয়, যাতে কোনো একটা attempt-এ
+        # miss হওয়া MCQ অন্য attempt-এ ধরা পড়লে সেটাও ফাইনাল লিস্টে চলে আসে।
         prompt = MCQ_PROMPT_EXISTING_ONLY.format(topic=topic_str, page=page_str)
-        max_attempts = 3  # প্রথম try + আরও 2 বার retry
+        return await _extract_existing_mcqs_merged(prompt, image_bytes, mime_type, keys, page)
     elif count:
         prompt = MCQ_PROMPT_WITH_COUNT.format(count=count, topic=topic_str, page=page_str)
         max_attempts = 1
@@ -652,25 +655,6 @@ async def gemini_generate_mcq(image_bytes: bytes, mime_type: str = "image/jpeg",
                 db_increment_key_usage(key)
                 text = resp.text or ""
 
-                if existing_only:
-                    # এই mode-এ Gemini ইচ্ছাকৃতভাবে [] রিটার্ন করতে পারে (page-এ সত্যিই কোনো
-                    # existing MCQ নাই) — সেটা success/valid response, error না। শুধু
-                    # completely invalid/unparseable response হলেই retry/next-key করবো।
-                    mcqs = parse_mcq_json(text)
-                    cleaned = text.strip()
-                    if cleaned.startswith("```"):
-                        cleaned = cleaned.strip("`").replace("json", "", 1).strip()
-                    is_syntactically_valid_json = False
-                    try:
-                        parsed_raw = json.loads(cleaned) if cleaned else []
-                        is_syntactically_valid_json = isinstance(parsed_raw, list)
-                    except (json.JSONDecodeError, ValueError):
-                        is_syntactically_valid_json = False
-                    if mcqs or is_syntactically_valid_json:
-                        return mcqs, None
-                    last_err = "Unparseable response"
-                    continue
-
                 mcqs = parse_mcq_json(text)
                 if mcqs:
                     return mcqs, None
@@ -680,15 +664,96 @@ async def gemini_generate_mcq(image_bytes: bytes, mime_type: str = "image/jpeg",
                 last_err = str(e)
                 continue
 
-        if existing_only and attempt < max_attempts:
-            logger.info(f"[existing_only] Page {page}: attempt {attempt} inconclusive, retrying ({last_err})")
-            continue
-
-    if existing_only:
-        # সব attempt শেষেও কিছু বের করা যায়নি — soft fail, caller page skip করবে ও কারণ জানাবে
-        return [], f"NO_EXISTING_MCQ::{last_err or 'no readymade MCQ found on this page'}"
-
     return [], f"❌ সব Gemini key ব্যর্থ হয়েছে বা আজকের quota শেষ। ({last_err})"
+
+
+def _normalize_q_for_dedup(question: str) -> str:
+    """Whitespace/punctuation normalize করে দুইটা attempt-এর একই MCQ-কে duplicate হিসেবে ধরার জন্য."""
+    q = re.sub(r'\s+', ' ', (question or '').strip().lower())
+    q = re.sub(r'[^\w\u0980-\u09FF ]+', '', q)
+    return q
+
+
+async def _extract_existing_mcqs_merged(prompt: str, image_bytes: bytes, mime_type: str, keys: list, page: int) -> tuple:
+    """
+    Existing MCQ mode-এর জন্য: N টা independent Gemini attempt চালিয়ে সব attempt-এর
+    রেজাল্ট union/merge করে ফেরত দেয় — কোনো একটা attempt কম MCQ দিলেও (partial miss)
+    অন্য attempt-এ সেই MCQ ধরা পড়লে সেটা ফাইনাল লিস্টে থাকবে। একই MCQ (question টেক্সট
+    মিললে) duplicate হিসেবে বাদ দেওয়া হয়।
+    """
+    NUM_ATTEMPTS = 3  # প্রতি page-এ ৩টা independent extraction pass, তারপর union
+    last_err = None
+    merged: dict = {}  # normalized_question -> mcq dict
+    any_success = False
+
+    def _pick_keys():
+        return [k for k in keys if db_key_usage_today(k) < DAILY_KEY_LIMIT]
+
+    for attempt in range(1, NUM_ATTEMPTS + 1):
+        usable_keys = _pick_keys()
+        if not usable_keys:
+            if any_success:
+                break  # quota শেষ কিন্তু আগের attempt(গুলো) থেকে কিছু পাওয়া গেছে — সেগুলো দিয়ে এগোই
+            return [], f"NO_EXISTING_MCQ::সব Gemini key-এর quota শেষ ({last_err})"
+
+        got_this_attempt = False
+        for key in usable_keys:
+            try:
+                from google import genai
+                from google.genai import types
+                client = genai.Client(api_key=key)
+
+                def _call():
+                    return client.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=[
+                            types.Part.from_text(text=prompt),
+                            types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                        ]
+                    )
+                resp = await asyncio.to_thread(_call)
+                db_increment_key_usage(key)
+                text = resp.text or ""
+
+                mcqs = parse_mcq_json(text)
+                cleaned = text.strip()
+                if cleaned.startswith("```"):
+                    cleaned = cleaned.strip("`").replace("json", "", 1).strip()
+                is_syntactically_valid_json = False
+                try:
+                    parsed_raw = json.loads(cleaned) if cleaned else []
+                    is_syntactically_valid_json = isinstance(parsed_raw, list)
+                except (json.JSONDecodeError, ValueError):
+                    is_syntactically_valid_json = False
+
+                if mcqs or is_syntactically_valid_json:
+                    any_success = True
+                    got_this_attempt = True
+                    for m in mcqs:
+                        key_q = _normalize_q_for_dedup(m.get("question", ""))
+                        if not key_q:
+                            continue
+                        if key_q not in merged:
+                            merged[key_q] = m
+                    break  # এই attempt-এর জন্য key খোঁজা শেষ, পরের attempt-এ যাও
+                last_err = "Unparseable response"
+            except Exception as e:
+                logger.warning(f"[existing_only] Gemini key failed (attempt {attempt}/{NUM_ATTEMPTS}, page {page}): {e}")
+                last_err = str(e)
+                continue
+
+        if not got_this_attempt:
+            logger.info(f"[existing_only] Page {page}: attempt {attempt} produced nothing usable ({last_err})")
+
+    if merged:
+        return list(merged.values()), None
+
+    if any_success:
+        # সবগুলো attempt সফলভাবে চলেছে এবং প্রতিটাই [] দিয়েছে — মানে সত্যিই এই page-এ
+        # কোনো readymade MCQ নেই, এটা genuine empty, error না
+        return [], f"NO_EXISTING_MCQ::page-এ কোনো readymade MCQ পাওয়া যায়নি (confirmed by {NUM_ATTEMPTS} attempts)"
+
+    return [], f"NO_EXISTING_MCQ::{last_err or 'no readymade MCQ found on this page'}"
 
 
 def parse_mcq_json(text: str) -> list:
