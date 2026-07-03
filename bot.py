@@ -584,6 +584,10 @@ MCQ_PROMPT_EXISTING_ONLY = """📝 Special MCQ TYPE: EXISTING EXTRACTION ONLY (S
 -MCQ-এর প্রশ্ন ও ৪টি option হুবহু সোর্সের টেক্সট অনুযায়ী রাখবে — rewrite/paraphrase/summarize করবে না, শুধু accurately extract করবে (শুধু নম্বরিং প্রিফিক্স যেমন ১./Q1./ক. রিমুভ করবে)।
 -টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা,সেকশনের নাম,"Card 1"/"Card 2" এর মতো navigation/label টেক্সট কখনো MCQ হিসেবে extract করবে না।
 -স্পষ্ট বানান ভুল থাকলে ঠিক করে দেবে, কিন্তু অর্থ পাল্টাবে না।
+-সংখ্যা/সাল/তারিখ (Bengali সংখ্যা যেমন ১৯৭৬ বা English সংখ্যা যেমন 1976) অক্ষত হুবহু রাখবে —
+  Bengali সংখ্যাকে English-এ বা English সংখ্যাকে Bengali-তে কখনো convert করবে না, কোনো digit
+  বদলাবে না। সোর্সে যে script/digit-এ সংখ্যা লেখা ঠিক সেভাবেই output-এ রাখবে। প্রতিটা সংখ্যা
+  extract করার পর সোর্সের সাথে digit-by-digit মিলিয়ে verify করবে (৯↔9, ৬↔6 গুলিয়ে ফেলা কড়াভাবে নিষিদ্ধ)।
 
 🌐 LANGUAGE RULE (STRICT — MUST FOLLOW):
 -Source MCQ যে ভাষায় লেখা (Bengali বা English), হুবহু সেই ভাষায় রাখবে — কোনো translate করা সম্পূর্ণ নিষেধ
@@ -856,6 +860,22 @@ async def _extract_existing_mcqs_merged(prompt: str, image_bytes: bytes, mime_ty
     return [], f"NO_EXISTING_MCQ::{last_err or 'no readymade MCQ found on this page'}"
 
 
+def _has_mixed_digit_script(text: str) -> bool:
+    """
+    একই সংখ্যা token-এর ভেতর Bengali আর English digit মিশে থাকলে (যেমন '১9৭6') সেটা
+    OCR/generation করার সময় digit ভুল বসে যাওয়ার (script-swap corruption) সংকেত।
+    """
+    if not text:
+        return False
+    bn_digits = set('০১২৩৪৫৬৭৮৯')
+    for token in re.findall(r'[০-৯0-9]+', text):
+        has_bn = any(c in bn_digits for c in token)
+        has_en = any(c.isdigit() and c not in bn_digits for c in token)
+        if has_bn and has_en:
+            return True
+    return False
+
+
 def parse_mcq_json(text: str) -> list:
     t = (text or "").strip()
     if t.startswith("```json"):
@@ -894,6 +914,10 @@ def parse_mcq_json(text: str) -> list:
             # (e.g. "Card 1", "Section 2") instead of real factual content.
             if any(nav_label_re.match(o) for o in opts):
                 continue
+            q_text = str(m.get("question", ""))
+            expl_text = str(m.get("explanation", ""))
+            if _has_mixed_digit_script(q_text) or any(_has_mixed_digit_script(o) for o in opts) or _has_mixed_digit_script(expl_text):
+                logger.warning(f"[digit-integrity] Mixed Bengali/English digits detected in MCQ: {q_text[:60]}")
             ans = m.get("answer", "A")
             if isinstance(ans, str):
                 ans_idx = letter_map.get(ans.strip().upper()[:1], None)
