@@ -1064,7 +1064,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/wm — Watermark সেট করুন\n"
             "/ping — Bot status চেক করুন\n"
         )
-    else:
+    elif is_permitted(user.id):
         text += (
             "📋 <b>Available Commands:</b>\n"
             "/tag (name) — প্রশ্নের ট্যাগ সেট করুন\n"
@@ -1074,6 +1074,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/wm — Watermark সেট করুন\n"
             "/ping — Bot status চেক করুন\n"
         )
+    else:
+        await update.message.reply_text(
+            "আপনার বটে এক্সেস নাই❌\n"
+            "বটের মালিক সাজিদ আলম খান প্রহর(RpMC)\n"
+            "মালিকের সাথে যোগাযোগের জন্য 👉@Prohor_2007",
+            parse_mode=ParseMode.HTML,
+        )
+        return
 
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
