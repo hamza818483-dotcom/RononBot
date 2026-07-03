@@ -2281,11 +2281,92 @@ async def pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
+async def _deliver_pdf_cached(context, all_mcqs_csv, total_mcq, topic, chat_id, channel_id,
+                               thread_id, user_id, uname, csv_only, pdf_only, both_only, status_message):
+    """Deliver already-extracted MCQ rows instantly, without re-running Gemini extraction."""
+    if csv_only or pdf_only or both_only:
+        if csv_only or both_only:
+            csv_buf = io.StringIO()
+            writer = csv.writer(csv_buf)
+            writer.writerow(["questions", "option1", "option2", "option3", "option4",
+                              "answer", "explanation", "type", "section"])
+            for row in all_mcqs_csv:
+                writer.writerow(row)
+            csv_bio = io.BytesIO(csv_buf.getvalue().encode("utf-8"))
+            csv_bio.name = f"{topic}_mcq.csv"
+            await context.bot.send_document(
+                chat_id=chat_id, document=csv_bio, filename=f"{topic}_mcq.csv",
+                caption=f"📄 {topic} — {len(all_mcqs_csv)} MCQ"
+            )
+        if pdf_only or both_only:
+            mcqs_for_pdf = [
+                {"question": r[0], "options": [r[1], r[2], r[3], r[4]],
+                 "answer_index": int(r[5]) - 1, "explanation": r[6]}
+                for r in all_mcqs_csv
+            ]
+            settings = db_get_settings(user_id)
+            watermark = settings.get("watermark") or ""
+            pdf_bytes = generate_pdf(mcqs_for_pdf, topic, watermark)
+            if pdf_bytes:
+                pdf_bio = io.BytesIO(pdf_bytes)
+                pdf_bio.name = f"{topic}_mcq.pdf"
+                await context.bot.send_document(
+                    chat_id=chat_id, document=pdf_bio, filename=f"{topic}_mcq.pdf",
+                    caption=f"📑 {topic} — {len(all_mcqs_csv)} MCQ"
+                )
+        await status_message.edit_text(f"✅ <b>Done!</b>\n📝 Total MCQ: {total_mcq}", parse_mode=ParseMode.HTML)
+        return
+
+    # Channel mode — page image ছাড়া cached mcq থেকে সরাসরি poll পাঠানো
+    total_polls = 0
+    first_poll_link = ""
+    for i, mcq in enumerate(all_mcqs_csv):
+        q_text = build_question_text(user_id, mcq[0])
+        opts = mcq[1:5]
+        explanation = build_final_explanation(user_id, mcq[6])
+        ans_idx = int(mcq[5]) - 1
+        poll_msg = None
+        for _attempt in range(3):
+            try:
+                poll_msg = await context.bot.send_poll(
+                    chat_id=channel_id, question=q_text, options=opts, type="quiz",
+                    correct_option_id=ans_idx, explanation=(explanation or None),
+                    is_anonymous=True, message_thread_id=thread_id,
+                )
+                break
+            except Exception as e:
+                logger.warning(f"[PDF cached] Poll attempt {_attempt+1} failed: {e}")
+                await asyncio.sleep(2)
+        if poll_msg:
+            total_polls += 1
+            if i == 0:
+                cid_str = str(channel_id)
+                if cid_str.startswith("-100"):
+                    first_poll_link = f"https://t.me/c/{cid_str[4:]}/{poll_msg.message_id}"
+                else:
+                    first_poll_link = f"https://t.me/{cid_str.lstrip('@')}/{poll_msg.message_id}"
+        await asyncio.sleep(0.4)
+
+    summary = (
+        f"🟥Ronon Special Practice System\n🎯Topic: {topic}\n🚀Total MCQ: {total_mcq}\n\n"
+        f"🔗First Poll: {first_poll_link}\n\n💥শুভকামনা প্রিয় শিক্ষার্থী {uname}...\n"
+    )
+    summary_kwargs = {"chat_id": channel_id, "text": summary, "disable_web_page_preview": True}
+    if thread_id:
+        summary_kwargs["message_thread_id"] = thread_id
+    await context.bot.send_message(**summary_kwargs)
+    await status_message.edit_text(f"✅ <b>Done!</b>\n📝 Total MCQ sent: {total_polls}", parse_mode=ParseMode.HTML)
+
+
 async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_id, csv_only: bool = False, status_message=None, pdf_only: bool = False, both_only: bool = False):
     """
     100% ported from QuizBot's process_pdf_pages: live editing dashboard with
     per-page status + progress bar, poll send with 3x retry, first-poll-link
     per page summarized at the end, full CSV export of all extracted MCQ.
+
+    Extraction (Gemini calls) runs only once per uploaded PDF; result cached in
+    context.user_data["pdf_extracted"]. Later Channel/CSV/PDF/Both button presses on the
+    same PDF reuse the cache and deliver instantly instead of reprocessing from scratch.
     """
     doc = context.user_data.get("pdf_doc")
     topic = context.user_data.get("pdf_topic", DEFAULT_TOPIC)
@@ -2305,6 +2386,23 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
         return
 
     pdf_file_name = doc.file_name or "document.pdf"  # None হলে dashboard/caption-এ crash বা "None" text এড়াতে
+
+    cached = context.user_data.get("pdf_extracted")
+    if cached and cached.get("doc_id") == doc.file_unique_id:
+        if not status_message:
+            status_message = await update.message.reply_text("⏳ পাঠানো হচ্ছে...")
+        else:
+            await status_message.edit_text("⏳ পাঠানো হচ্ছে...")
+        try:
+            await _deliver_pdf_cached(
+                context, cached["all_mcqs_csv"], cached["total_mcq"], topic, chat_id, channel_id,
+                thread_id, user_id, uname, csv_only, pdf_only, both_only, status_message
+            )
+        except Exception as e:
+            logger.error(f"[PDF cached-deliver] error: {e}", exc_info=True)
+            await status_message.edit_text(f"❌ পাঠাতে সমস্যা হয়েছে: {e}")
+            await notify_owner(context, f"[PDF cached-deliver] Error:\n{e}")
+        return
 
     if not status_message:
         status_message = await update.message.reply_text("⏳ PDF download হচ্ছে...")
@@ -2517,6 +2615,11 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
             for r in all_mcqs_csv
         ]
         context.user_data["pdf_topic"] = topic
+        context.user_data["pdf_extracted"] = {
+            "doc_id": doc.file_unique_id,
+            "all_mcqs_csv": all_mcqs_csv,
+            "total_mcq": total_mcq,
+        }
 
         db_update_session_progress(session_id, len(pages), status="done")
 
@@ -2667,7 +2770,7 @@ def main():
     ptb_app.add_handler(CallbackQueryHandler(exp_callback, pattern="^exp_"))
     ptb_app.add_handler(CallbackQueryHandler(channel_callback, pattern="^(chdel_|chadd)"))
     ptb_app.add_handler(CallbackQueryHandler(img_callback, pattern="^(img_|imgmode_|imgch_)"))
-    ptb_app.add_handler(CallbackQueryHandler(pdf_callback, pattern="^pdfch_|^pdf_csv"))
+    ptb_app.add_handler(CallbackQueryHandler(pdf_callback, pattern="^pdfch_|^pdf_"))
     ptb_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     ptb_app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
     ptb_app.add_handler(MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, handle_reply_text))
