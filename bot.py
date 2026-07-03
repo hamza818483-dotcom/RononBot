@@ -618,11 +618,13 @@ Source E — আগের বা পরের page-এ থাকা answer key
 option না। "একটা MCQ-এর answer format অন্যগুলোর চেয়ে আলাদা/কম স্পষ্ট" — এটা কখনো MCQ বাদ দেওয়ার
 বৈধ কারণ না।
 
-🔀 OPTION SHUFFLE (বাধ্যতামূলক, প্রতিটা MCQ-তে, ব্যতিক্রম নাই):
--সঠিক উত্তর ডিটেক্ট করার পর, ৪টা option-কে র‍্যান্ডম নতুন ক্রমে সাজাবে যাতে সঠিক উত্তর সবসময় একই position-এ না থাকে।
--নতুন shuffled position অনুযায়ী "answer" letter আপডেট করবে।
--প্রতিটা MCQ-এর জন্য আলাদাভাবে শাফল করবে — একই pattern বারবার রিপিট করবে না।
--কড়াভাবে নিষিদ্ধ: পরপর একাধিক MCQ-তে একই answer letter (যেমন সব "A", বা "A" ৩+ বার পরপর) — সঠিক উত্তরের position পুরো সেট জুড়ে স্বাভাবিকভাবে এবং র‍্যান্ডমলি ছড়িয়ে দেবে।
+🎯 OPTION ORDER (STRICT — কখনো শাফল/পুনর্বিন্যাস করবে না):
+-সোর্সে option যে ক্রমে আছে (ক,খ,গ,ঘ / A,B,C,D / ১,২,৩,৪) output-এও ঠিক সেই একই ক্রমে রাখবে।
+-answer letter অবশ্যই সোর্সের option-এর আসল position অনুযায়ী দিবে — output-এর options array-তে
+  ওই position-এই থাকবে সঠিক উত্তর, কোনোভাবে option শাফল/reorder করলে answer letter ভুল হয়ে
+  যাবে, তাই option-এর ক্রম কখনো পরিবর্তন করবে না।
+-প্রতিটা MCQ finalize করার আগে verify করো: options array-এর যে index-এ সঠিক উত্তর, answer
+  letter সেই একই index নির্দেশ করছে কিনা (A=index 0, B=1, C=2, D=3)।
 
 💡 ব্যাখ্যা (STRICT PRIORITY ORDER):
 1) MCQ-এর নিচে/পাশে আগে থেকেই ব্যাখ্যা লেখা থাকলে → হুবহু, শব্দে-শব্দে, EXACTLY সোর্স থেকে কপি করবে। paraphrase/shorten/rewrite করবে না।
@@ -650,7 +652,7 @@ option না। "একটা MCQ-এর answer format অন্যগুলো
 🟪🟪🟪 INTERNAL SELF-VERIFICATION PROCESS (MUST FOLLOW) 🟪🟪🟪
 -Pass 1: পুরো page টা top থেকে bottom, left থেকে right স্ক্যান করে সব readymade MCQ-এর একটা draft লিস্ট বানাও।
 -Pass 2: আবার পুরো page টা নতুন করে স্ক্যান করো, checking mindset নিয়ে — Pass 1-এ কোনো MCQ বাদ পড়েছে কিনা। বিশেষভাবে page-এর একদম নিচের অংশ/শেষ MCQ, এবং column-এর একদম শেষ প্রশ্নটা আলাদাভাবে আবার চেক করো — শেষের MCQ সবচেয়ে বেশি miss হয়।
--Pass 3: Draft লিস্টের প্রতিটা MCQ-এর জন্য verify করো সঠিক উত্তর সত্যিই সোর্স থেকে নেওয়া হয়েছে কিনা, প্রশ্ন+৪টা option হুবহু মেলে কিনা, শাফল ঠিকমতো হয়েছে কিনা, এবং draft লিস্টের item সংখ্যা page-এ দৃশ্যমান MCQ সংখ্যার সাথে মিলছে কিনা (গণনা করে নিশ্চিত হও)।
+-Pass 3: Draft লিস্টের প্রতিটা MCQ-এর জন্য verify করো সঠিক উত্তর সত্যিই সোর্স থেকে নেওয়া হয়েছে কিনা, প্রশ্ন+৪টা option হুবহু মেলে কিনা এবং সোর্সের আসল ক্রমেই আছে কিনা, answer letter সঠিক position নির্দেশ করছে কিনা, এবং draft লিস্টের item সংখ্যা page-এ দৃশ্যমান MCQ সংখ্যার সাথে মিলছে কিনা (গণনা করে নিশ্চিত হও)।
 -শুধুমাত্র এই ৩টা internal pass শেষ হওয়ার পরেই final JSON output দিবে।
 
 Topic: {topic}
