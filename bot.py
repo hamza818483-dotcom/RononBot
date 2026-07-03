@@ -6,6 +6,7 @@ per-poll tags + explanations. Webhook mode for Render.
 import os
 import html
 import re
+import difflib
 import json
 import sqlite3
 import logging
@@ -575,7 +576,7 @@ MCQ_PROMPT_EXISTING_ONLY = """📝 Special MCQ TYPE: EXISTING EXTRACTION ONLY (S
 🟥🟥🟥 ABSOLUTE CRITICAL RULE — বার বার পড়ো, কখনো ভাঙবে না 🟥🟥🟥
 -তুমি এখানে EXTRACTOR, GENERATOR/CREATOR না।
 -এই page-এ যদি আগে থেকেই readymade বানানো MCQ (প্রশ্ন + ৪টি option + সঠিক উত্তর) থাকে, শুধুমাত্র সেগুলোই হুবহু তুলে আনবে।
--তুমি কক্ষনো নিজে থেকে নতুন কোনো MCQ বানাবে না, কোনো তথ্য/লাইন/প্যারাগ্রাফ থেকে নতুন প্রশ্ন তৈরি করবে না — এমনকি page-এ MCQ বানানোর মতো ভালো তথ্য থাকলেও না।
+-তুমি কক্ষনো নিজে থেকে নতুন কোনো MCQ বানাবে না, কোনো তথ্য/লাইন/প্যারাগ্রাফ থেকে নতুন প্রশ্ন তৈরি করবে না — এমনকি page-এ MCQ বানানোর মতো ভালো তথ্য থাকলেও না। এই page-এ যতগুলো readymade MCQ চোখে দেখা যায় ঠিক ততগুলোই output হবে — এক্সট্রাও না, কমও না।
 -যদি এই page-এ কোনো readymade MCQ না থাকে (শুধু প্লেইন টেক্সট/তথ্য/প্যারাগ্রাফ থাকে, কোনো "প্রশ্ন+option+উত্তর" স্ট্রাকচার নাই), তাহলে অবশ্যই empty JSON array [] রিটার্ন করবে। কোনো MCQ বানিয়ে দিবে না।
 -এই page-এ থাকা প্রতিটি readymade MCQ MUST তুলে আনতে হবে — একটাও miss/skip করা যাবে না। খুব ছোট, অস্পষ্ট, বা কোণায় থাকা MCQ-ও বাদ দেওয়া যাবে না।
 -OUTPUT ORDER: page-এ MCQ যে সিরিয়ালে/ক্রমে আছে (উপর থেকে নিচে, বাম থেকে ডান), output JSON array-ও ঠিক সেই একই ক্রমে দিবে — প্রতিটা MCQ-এর সাথে তার নিজের ৪টা option ঠিক একইভাবে (একই ক্রমে, একই ম্যাচিং সহ) বেঁধে রাখবে, কোনো MCQ-এর option অন্য MCQ-এর সাথে মিক্স হবে না।
@@ -728,6 +729,31 @@ def _normalize_q_for_dedup(question: str) -> str:
     return q
 
 
+def _is_duplicate_mcq(norm_q: str, existing_keys: list, threshold: float = 0.85) -> str:
+    """
+    Exact match না থাকলেও near-identical প্রশ্ন (extraction attempt ভেদে সামান্য spelling/space
+    difference) কে duplicate হিসেবে ধরার জন্য fuzzy match। Match পেলে সেই existing key রিটার্ন
+    করে, না পেলে None।
+    """
+    if not norm_q:
+        return None
+    if norm_q in existing_keys:
+        return norm_q
+    for k in existing_keys:
+        if not k:
+            continue
+        shorter, longer = (k, norm_q) if len(k) <= len(norm_q) else (norm_q, k)
+        if not shorter:
+            continue
+        # substantial substring overlap (covers minor prefix/suffix drift) OR very high char overlap
+        if shorter in longer and len(shorter) >= 0.7 * len(longer):
+            return k
+        ratio = difflib.SequenceMatcher(None, norm_q, k).ratio()
+        if ratio >= threshold:
+            return k
+    return None
+
+
 async def _extract_existing_mcqs_merged(prompt: str, image_bytes: bytes, mime_type: str, keys: list, page: int) -> tuple:
     """
     Existing MCQ mode-এর জন্য: N টা independent Gemini attempt চালিয়ে সব attempt-এর
@@ -742,6 +768,7 @@ async def _extract_existing_mcqs_merged(prompt: str, image_bytes: bytes, mime_ty
     last_err = None
     merged: dict = {}  # normalized_question -> mcq dict
     merge_order: list = []  # normalized_question keys, first-seen order (page-এর serial বজায় রাখতে)
+    attempt_counts: list = []  # প্রতি attempt-এ কয়টা MCQ পাওয়া গেছে (hallucination/runaway-merge guard)
     any_success = False
 
     def _pick_keys():
@@ -791,11 +818,13 @@ async def _extract_existing_mcqs_merged(prompt: str, image_bytes: bytes, mime_ty
                 if mcqs or is_syntactically_valid_json:
                     any_success = True
                     got_this_attempt = True
+                    attempt_counts.append(len(mcqs))
                     for m in mcqs:
                         key_q = _normalize_q_for_dedup(m.get("question", ""))
                         if not key_q:
                             continue
-                        if key_q not in merged:
+                        dup_key = _is_duplicate_mcq(key_q, merge_order)
+                        if dup_key is None:
                             merged[key_q] = m
                             merge_order.append(key_q)
                     break  # এই attempt-এর জন্য key খোঁজা শেষ, পরের attempt-এ যাও
@@ -811,7 +840,13 @@ async def _extract_existing_mcqs_merged(prompt: str, image_bytes: bytes, mime_ty
     if merged:
         # merge_order = প্রথম যে attempt-এ যে ক্রমে MCQ পাওয়া গেছে সেই ক্রম — এটাই page-এর
         # আসল serial order-এর সবচেয়ে কাছের approximation, তাই এই ক্রমেই ফেরত দেওয়া হয়
-        return [merged[k] for k in merge_order], None
+        final_list = [merged[k] for k in merge_order]
+        # Safety cap: union কখনোই কোনো একক attempt-এর সর্বোচ্চ count-এর চেয়ে বেশি হওয়া উচিত না —
+        # হলে বুঝতে হবে dedup miss করেছে বা কোনো attempt hallucinate করেছে, তাই সেক্ষেত্রে
+        # সবচেয়ে বেশি MCQ দেওয়া attempt-টাকেই সবচেয়ে নির্ভরযোগ্য ধরে সেই সংখ্যায় ক্যাপ করা হয়
+        if attempt_counts and len(final_list) > max(attempt_counts):
+            final_list = final_list[:max(attempt_counts)]
+        return final_list, None
 
     if any_success:
         # সবগুলো attempt সফলভাবে চলেছে এবং প্রতিটাই [] দিয়েছে — মানে সত্যিই এই page-এ
