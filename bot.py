@@ -565,8 +565,44 @@ MUST Return ONLY valid JSON array, no markdown:
 [{{"question":"...","options":["option1","option2","option3","option4"],"answer":"C","explanation":"...","uddipok":""}}]"""
 
 
+# ============================================================
+# EXISTING MCQ EXTRACTION PROMPT (STRICT — NO NEW MCQ GENERATION)
+# ============================================================
+# এই prompt শুধুমাত্র page-এ আগে থেকে readymade বানানো MCQ (question + options +
+# answer/ব্যাখ্যা সহ) থাকলে সেগুলো হুবহু extract করার জন্য। কখনোই নতুন MCQ বানাবে না।
+MCQ_PROMPT_EXISTING_ONLY = """📝 Special MCQ TYPE: EXISTING EXTRACTION ONLY (STRICT MODE)
+
+🟥🟥🟥 ABSOLUTE CRITICAL RULE — বার বার পড়ো, কখনো ভাঙবে না 🟥🟥🟥
+-তুমি এখানে EXTRACTOR, GENERATOR/CREATOR না।
+-এই page-এ যদি আগে থেকেই readymade বানানো MCQ (প্রশ্ন + ৪টি option + সঠিক উত্তর) থাকে, শুধুমাত্র সেগুলোই হুবহু তুলে আনবে।
+-তুমি কক্ষনো নিজে থেকে নতুন কোনো MCQ বানাবে না, কোনো তথ্য/লাইন/প্যারাগ্রাফ থেকে নতুন প্রশ্ন তৈরি করবে না — এমনকি page-এ MCQ বানানোর মতো ভালো তথ্য থাকলেও না।
+-যদি এই page-এ কোনো readymade MCQ না থাকে (শুধু প্লেইন টেক্সট/তথ্য/প্যারাগ্রাফ থাকে, কোনো "প্রশ্ন+option+উত্তর" স্ট্রাকচার নাই), তাহলে অবশ্যই empty JSON array [] রিটার্ন করবে। কোনো MCQ বানিয়ে দিবে না।
+-প্রতিটি readymade MCQ-এর জন্য অবশ্যই সঠিক উত্তর (answer) থাকতে হবে explanation/answer key অংশে বা প্রশ্নের নিচে/পাশে চিহ্নিত করা থাকতে হবে। উত্তর কোথাও খুঁজে না পেলে সেই MCQ স্কিপ করবে, নিজে অনুমান করে উত্তর বসাবে না।
+-এই page-এ থাকা প্রতিটি readymade MCQ MUST তুলে আনতে হবে — একটাও miss/skip করা যাবে না। খুব ছোট, অস্পষ্ট, বা কোণায় থাকা MCQ-ও বাদ দেওয়া যাবে না।
+-MCQ-এর প্রশ্ন, ৪টি option, এবং ব্যাখ্যা (যদি থাকে) হুবহু সোর্সের টেক্সট অনুযায়ী রাখবে — rewrite/paraphrase/summarize করবে না, শুধু accurately extract করবে।
+-টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা,সেকশনের নাম,"Card 1"/"Card 2" এর মতো navigation/label টেক্সট কখনো MCQ হিসেবে extract করবে না।
+
+🌐 LANGUAGE RULE (STRICT — MUST FOLLOW):
+-Source MCQ যে ভাষায় লেখা (Bengali বা English), হুবহু সেই ভাষায় রাখবে — কোনো translate করা সম্পূর্ণ নিষেধ
+
+💥প্রশ্ন: সোর্সে যেভাবে লেখা হুবহু সেভাবে (rewrite করবে না)
+💥অপশন: সোর্সের ৪টি option হুবহু, prefix (A)/B)/ক./ইত্যাদি) ছাড়া
+💥উত্তর: source-এ যেটা সঠিক হিসেবে মার্ক করা/দেওয়া আছে ঠিক সেটাই — নিজে অনুমান করবে না
+💥ব্যাখ্যা: source-এ থাকলে হুবহু (max 200 chars), না থাকলে "" রাখবে
+
+🟨 উদ্দীপক RULE (শুধু বাংলা উদ্দীপকযুক্ত প্রশ্নে):
+-বাংলা উদ্দীপক/passage থাকলে, সেই উদ্দীপক টেক্সট "uddipok" ফিল্ডে বসাবে; একই উদ্দীপকের সব MCQ-তে হুবহু একই টেক্সট থাকবে
+-উদ্দীপক না থাকলে "uddipok" ফিল্ড "" রাখবে
+
+Topic: {topic}
+Page: {page}
+
+MUST Return ONLY valid JSON array, no markdown. যদি এই page-এ কোনো readymade MCQ না থাকে, ঠিক এভাবে রিটার্ন করবে: []
+[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"A","explanation":"...","uddipok":""}}]"""
+
+
 async def gemini_generate_mcq(image_bytes: bytes, mime_type: str = "image/jpeg", count: int = None,
-                               topic: str = None, page: int = None) -> tuple:
+                               topic: str = None, page: int = None, existing_only: bool = False) -> tuple:
     keys = db_get_active_keys()
     if not keys:
         return [], "❌ কোনো Gemini API key যোগ করা নেই। /addkey দিয়ে key যোগ করুন।"
@@ -574,39 +610,82 @@ async def gemini_generate_mcq(image_bytes: bytes, mime_type: str = "image/jpeg",
     topic_str = topic or DEFAULT_TOPIC
     page_str = str(page).zfill(2) if page else "01"
 
-    if count:
+    if existing_only:
+        # Existing MCQ mode: শুধু page-এ readymade থাকা MCQ extract করবে, নতুন বানাবে না।
+        # Gemini প্রথমবার miss করে ফেলতে পারে (existing MCQ থাকা সত্ত্বেও কম/০ রিটার্ন),
+        # তাই এই mode-এ retry করা হবে যাতে সত্যিকারের existing MCQ miss না হয়।
+        prompt = MCQ_PROMPT_EXISTING_ONLY.format(topic=topic_str, page=page_str)
+        max_attempts = 3  # প্রথম try + আরও 2 বার retry
+    elif count:
         prompt = MCQ_PROMPT_WITH_COUNT.format(count=count, topic=topic_str, page=page_str)
+        max_attempts = 1
     else:
         prompt = MCQ_PROMPT_MAX.format(topic=topic_str, page=page_str)
+        max_attempts = 1
 
     last_err = None
-    for key in keys:
-        if db_key_usage_today(key) >= DAILY_KEY_LIMIT:
-            continue
-        try:
-            from google import genai
-            from google.genai import types
-            client = genai.Client(api_key=key)
 
-            def _call():
-                return client.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=[
-                        types.Part.from_text(text=prompt),
-                        types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                    ]
-                )
-            resp = await asyncio.to_thread(_call)
-            db_increment_key_usage(key)
-            text = resp.text or ""
-            mcqs = parse_mcq_json(text)
-            if mcqs:
-                return mcqs, None
-            last_err = "Empty/invalid response"
-        except Exception as e:
-            logger.warning(f"Gemini key failed: {e}")
-            last_err = str(e)
+    def _pick_keys():
+        return [k for k in keys if db_key_usage_today(k) < DAILY_KEY_LIMIT]
+
+    for attempt in range(1, max_attempts + 1):
+        usable_keys = _pick_keys()
+        if not usable_keys:
+            return [], f"❌ সব Gemini key-এর আজকের quota শেষ। ({last_err})"
+
+        for key in usable_keys:
+            try:
+                from google import genai
+                from google.genai import types
+                client = genai.Client(api_key=key)
+
+                def _call():
+                    return client.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=[
+                            types.Part.from_text(text=prompt),
+                            types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                        ]
+                    )
+                resp = await asyncio.to_thread(_call)
+                db_increment_key_usage(key)
+                text = resp.text or ""
+
+                if existing_only:
+                    # এই mode-এ Gemini ইচ্ছাকৃতভাবে [] রিটার্ন করতে পারে (page-এ সত্যিই কোনো
+                    # existing MCQ নাই) — সেটা success/valid response, error না। শুধু
+                    # completely invalid/unparseable response হলেই retry/next-key করবো।
+                    mcqs = parse_mcq_json(text)
+                    cleaned = text.strip()
+                    if cleaned.startswith("```"):
+                        cleaned = cleaned.strip("`").replace("json", "", 1).strip()
+                    is_syntactically_valid_json = False
+                    try:
+                        parsed_raw = json.loads(cleaned) if cleaned else []
+                        is_syntactically_valid_json = isinstance(parsed_raw, list)
+                    except (json.JSONDecodeError, ValueError):
+                        is_syntactically_valid_json = False
+                    if mcqs or is_syntactically_valid_json:
+                        return mcqs, None
+                    last_err = "Unparseable response"
+                    continue
+
+                mcqs = parse_mcq_json(text)
+                if mcqs:
+                    return mcqs, None
+                last_err = "Empty/invalid response"
+            except Exception as e:
+                logger.warning(f"Gemini key failed (attempt {attempt}/{max_attempts}): {e}")
+                last_err = str(e)
+                continue
+
+        if existing_only and attempt < max_attempts:
+            logger.info(f"[existing_only] Page {page}: attempt {attempt} inconclusive, retrying ({last_err})")
             continue
+
+    if existing_only:
+        # সব attempt শেষেও কিছু বের করা যায়নি — soft fail, caller page skip করবে ও কারণ জানাবে
+        return [], f"NO_EXISTING_MCQ::{last_err or 'no readymade MCQ found on this page'}"
 
     return [], f"❌ সব Gemini key ব্যর্থ হয়েছে বা আজকের quota শেষ। ({last_err})"
 
@@ -2214,40 +2293,31 @@ async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["pdf_per_page"] = per_page_count
             context.user_data["pdf_user_id"] = update.effective_user.id
             context.user_data["pdf_thread_id"] = thread_id
+            context.user_data["pdf_channel_id_arg"] = channel_id
+            context.user_data["pdf_file_name"] = file_name
             # নতুন PDF হলে আগের PDF-এর cache clear — নাহলে ভুল/পুরনো MCQ button-এ deliver হয়ে যেতে পারে
             old_cache = context.user_data.get("pdf_extracted")
             if not old_cache or old_cache.get("doc_id") != doc.file_unique_id:
                 context.user_data.pop("pdf_extracted", None)
 
-            # Extraction (Gemini) এখন এখানেই, button দেখানোর আগে হয় — যাতে পরে যেকোনো
-            # button (Channel/CSV/PDF/Both) চাপলে re-process না হয়ে সরাসরি instant deliver হয়
-            status_message = await update.message.reply_text("⏳ PDF process হচ্ছে...")
-            ok = await _extract_pdf_mcqs(update, context, status_message)
-            if not ok:
-                return  # status_message already shows the specific error
-
-            if channel_id:
-                await process_pdf(update, context, channel_id, status_message=status_message)
-            else:
-                channels = db_list_channels()
-                kb = []
-                for cid, cname in channels:
-                    kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"pdfch_{cid}")])
-                kb.append([InlineKeyboardButton("📄 CSV Only", callback_data="pdf_csv_only")])
-                kb.append([InlineKeyboardButton("📑 PDF Only", callback_data="pdf_pdf_only")])
-                kb.append([InlineKeyboardButton("🎁 Both (CSV+PDF)", callback_data="pdf_both")])
-                no_channel_note = "" if channels else "\n\n⚠️ কোনো চ্যানেল যোগ করা নেই — /channel দিয়ে যোগ করো, অথবা CSV Only বেছে নাও।"
-                cached = context.user_data["pdf_extracted"]
-                await update.message.reply_text(
-                    f"📋 <b>{file_name}</b>\n"
-                    f"🎯 Topic: <b>{topic}</b>\n"
-                    f"📄 Page Range: <b>{page_range or 'All'}</b>\n"
-                    f"🎯 Per Page MCQ: <b>{per_page_count or 'Highest Possible'}</b>\n"
-                    f"📝 Extracted MCQ: <b>{cached['total_mcq']}</b>\n\n"
-                    f"Channel select করো:{no_channel_note}",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(kb)
-                )
+            # নতুন: extraction শুরুর আগে New MCQ / Existing MCQ মোড বেছে নিতে হবে।
+            # New MCQ = আগের মতোই AI নিজে থেকে MCQ বানাবে (source-এর সব তথ্য থেকে)।
+            # Existing MCQ = page-এ আগে থেকে readymade বানানো MCQ থাকলে শুধু সেগুলোই
+            # তুলে আনবে, নিজে থেকে কখনো নতুন MCQ বানাবে না।
+            kb = [
+                [InlineKeyboardButton("🆕 New MCQ", callback_data="pdfmode_new")],
+                [InlineKeyboardButton("📋 Existing MCQ", callback_data="pdfmode_existing")],
+            ]
+            await update.message.reply_text(
+                f"📋 <b>{file_name}</b>\n"
+                f"🎯 Topic: <b>{topic}</b>\n"
+                f"📄 Page Range: <b>{page_range or 'All'}</b>\n\n"
+                "MCQ মোড বেছে নাও:\n"
+                "🆕 <b>New MCQ</b> — সব তথ্য থেকে AI নিজে নতুন MCQ বানাবে (আগের মতো)\n"
+                "📋 <b>Existing MCQ</b> — page-এ আগে থেকে থাকা readymade MCQ শুধু তুলে আনবে, নতুন বানাবে না",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
             return
         except Exception as e:
             # আগে এখানে কোনো safety net ছিল না — /pdf reply দেওয়ার পর args parsing বা
@@ -2259,6 +2329,69 @@ async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     await update.message.reply_text("❌ PDF ফাইলে reply করে /pdf দাও!")
+    return
+
+
+async def pdf_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """New MCQ / Existing MCQ মোড বাছাইয়ের পর extraction শুরু করে, তারপর channel/CSV/PDF/Both button দেখায়।"""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    doc = context.user_data.get("pdf_doc")
+    if not doc:
+        await query.edit_message_text("❌ Session expire হয়ে গেছে, আবার PDF-এ reply করে /pdf দাও।")
+        return
+
+    existing_only = (data == "pdfmode_existing")
+    context.user_data["pdf_existing_only"] = existing_only
+
+    topic = context.user_data.get("pdf_topic", DEFAULT_TOPIC)
+    page_range = context.user_data.get("pdf_page_range")
+    per_page_count = context.user_data.get("pdf_per_page")
+    channel_id = context.user_data.get("pdf_channel_id_arg")
+    file_name = context.user_data.get("pdf_file_name", "document.pdf")
+
+    mode_label = "📋 Existing MCQ" if existing_only else "🆕 New MCQ"
+    status_message = await query.edit_message_text(f"⏳ PDF process হচ্ছে... ({mode_label})")
+
+    ok = await _extract_pdf_mcqs(update, context, status_message)
+    if not ok:
+        return  # status_message already shows the specific error
+
+    if channel_id:
+        await process_pdf(update, context, channel_id, status_message=status_message)
+    else:
+        channels = db_list_channels()
+        kb = []
+        for cid, cname in channels:
+            kb.append([InlineKeyboardButton(f"📢 {cname}", callback_data=f"pdfch_{cid}")])
+        kb.append([InlineKeyboardButton("📄 CSV Only", callback_data="pdf_csv_only")])
+        kb.append([InlineKeyboardButton("📑 PDF Only", callback_data="pdf_pdf_only")])
+        kb.append([InlineKeyboardButton("🎁 Both (CSV+PDF)", callback_data="pdf_both")])
+        no_channel_note = "" if channels else "\n\n⚠️ কোনো চ্যানেল যোগ করা নেই — /channel দিয়ে যোগ করো, অথবা CSV Only বেছে নাও।"
+        cached = context.user_data["pdf_extracted"]
+        skipped_note = ""
+        skipped_pages = cached.get("skipped_pages") or []
+        if existing_only and skipped_pages:
+            skipped_note = (
+                f"\n⚠️ <b>{len(skipped_pages)} টি page-এ</b> কোনো existing MCQ পাওয়া যায়নি, "
+                f"তাই skip করা হয়েছে (page: {', '.join(str(p) for p in skipped_pages)})।"
+            )
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=(
+                f"📋 <b>{file_name}</b>\n"
+                f"🎯 Topic: <b>{topic}</b>\n"
+                f"📄 Page Range: <b>{page_range or 'All'}</b>\n"
+                f"🎯 Per Page MCQ: <b>{per_page_count or 'Highest Possible'}</b>\n"
+                f"🧩 Mode: <b>{mode_label}</b>\n"
+                f"📝 Extracted MCQ: <b>{cached['total_mcq']}</b>{skipped_note}\n\n"
+                f"Channel select করো:{no_channel_note}"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
     return
 
 
@@ -2386,6 +2519,7 @@ async def _extract_pdf_mcqs(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     per_page = context.user_data.get("pdf_per_page")
     user_id = context.user_data.get("pdf_user_id", update.effective_user.id)
     uname = update.effective_user.first_name or "User"
+    existing_only = context.user_data.get("pdf_existing_only", False)
 
     pdf_file_name = doc.file_name or "document.pdf"
 
@@ -2442,6 +2576,7 @@ async def _extract_pdf_mcqs(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         )
 
         all_mcqs_csv = []
+        skipped_pages = []  # existing_only mode-এ যেসব page-এ কোনো readymade MCQ পাওয়া যায়নি
 
         for idx, (page_num, img) in enumerate(pages):
             page_status[idx]["current"] = True
@@ -2455,7 +2590,20 @@ async def _extract_pdf_mcqs(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 img.save(buf, format="JPEG")
                 page_bytes = buf.getvalue()
 
-                mcqs, error = await gemini_generate_mcq(page_bytes, "image/jpeg", per_page, topic=topic, page=page_num)
+                mcqs, error = await gemini_generate_mcq(
+                    page_bytes, "image/jpeg", per_page, topic=topic, page=page_num,
+                    existing_only=existing_only
+                )
+
+                if existing_only and error and error.startswith("NO_EXISTING_MCQ::"):
+                    # Soft skip: এই page-এ existing MCQ পাওয়া যায়নি (2-3 বার চেষ্টার পরও)।
+                    # নিজে থেকে কিছু বানানো হবে না — শুধু কারণ জানিয়ে পরের page-এ যাওয়া হবে।
+                    page_status[idx]["current"] = False
+                    page_status[idx]["done"] = True
+                    skipped_pages.append(page_num)
+                    logger.info(f"[existing_only] Page {page_num} skipped — no readymade MCQ found ({error})")
+                    continue
+
                 if error or not mcqs:
                     page_status[idx]["current"] = False
                     page_status[idx]["done"] = True
@@ -2495,13 +2643,22 @@ async def _extract_pdf_mcqs(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
         if not all_mcqs_csv:
             db_update_session_progress(session_id, len(pages), status="failed")
-            await status_message.edit_text("❌ কোনো MCQ বের করা যায়নি। অন্য PDF দিয়ে চেষ্টা করো।")
+            if existing_only and skipped_pages:
+                await status_message.edit_text(
+                    "❌ কোনো existing MCQ পাওয়া যায়নি।\n"
+                    f"⚠️ সব {len(skipped_pages)} টি page-এ readymade MCQ ছিল না, তাই কিছু বানানো হয়নি "
+                    "(Existing MCQ মোডে নতুন MCQ বানানো হয় না)।\n"
+                    "নতুন MCQ চাইলে আবার /pdf দিয়ে এবার 🆕 New MCQ বেছে নাও।"
+                )
+            else:
+                await status_message.edit_text("❌ কোনো MCQ বের করা যায়নি। অন্য PDF দিয়ে চেষ্টা করো।")
             return False
 
         context.user_data["pdf_extracted"] = {
             "doc_id": doc.file_unique_id,
             "all_mcqs_csv": all_mcqs_csv,
             "total_mcq": total_mcq,
+            "skipped_pages": skipped_pages,
         }
         context.user_data["pdf_mcqs"] = [
             {"question": r[0], "options": [r[1], r[2], r[3], r[4]],
@@ -2513,9 +2670,10 @@ async def _extract_pdf_mcqs(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
         elapsed = int(time.time() - start_time)
         mins, secs = divmod(elapsed, 60)
+        skip_line = f"\n⚠️ Existing MCQ না পেয়ে skip: {len(skipped_pages)} page" if (existing_only and skipped_pages) else ""
         await status_message.edit_text(
             f"✅ <b>Processing Complete!</b>\n\n📄 File: {pdf_file_name}\n🎯 Topic: {topic}\n"
-            f"📝 Total MCQ: {total_mcq}\n📋 Pages: {len(pages)}\n⏱️ Time: {mins}:{secs:02d}",
+            f"📝 Total MCQ: {total_mcq}\n📋 Pages: {len(pages)}\n⏱️ Time: {mins}:{secs:02d}{skip_line}",
             parse_mode=ParseMode.HTML
         )
         return True
@@ -2707,6 +2865,7 @@ def main():
     ptb_app.add_handler(CallbackQueryHandler(exp_callback, pattern="^exp_"))
     ptb_app.add_handler(CallbackQueryHandler(channel_callback, pattern="^(chdel_|chadd)"))
     ptb_app.add_handler(CallbackQueryHandler(img_callback, pattern="^(img_|imgmode_|imgch_)"))
+    ptb_app.add_handler(CallbackQueryHandler(pdf_mode_callback, pattern="^pdfmode_"))
     ptb_app.add_handler(CallbackQueryHandler(pdf_callback, pattern="^pdfch_|^pdf_"))
     ptb_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     ptb_app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
