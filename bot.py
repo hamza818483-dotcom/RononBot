@@ -749,6 +749,10 @@ def generate_pdf(mcqs: list, topic: str, watermark: str = "") -> bytes:
         return b""
 
     class MCQPDF(FPDF):
+        def __init__(self, watermark_text="", *args, **kwargs):
+            self.watermark_text = watermark_text
+            super().__init__(*args, **kwargs)
+
         def header(self):
             # Watermark / Header banner
             if self.watermark_text:
@@ -767,9 +771,8 @@ def generate_pdf(mcqs: list, topic: str, watermark: str = "") -> bytes:
             self.set_text_color(128, 128, 128)
             self.cell(0, 10, f'Page {self.page_no()} | {topic}', 0, 0, 'C')
 
-    pdf = MCQPDF()
+    pdf = MCQPDF(watermark_text=watermark)
     pdf.font_name = 'Arial'
-    pdf.watermark_text = watermark
 
     font_path = find_unicode_font()
     if font_path:
