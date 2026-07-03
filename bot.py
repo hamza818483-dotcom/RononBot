@@ -755,6 +755,14 @@ def generate_pdf(mcqs: list, topic: str, watermark: str = "") -> bytes:
             super().__init__(*args, **kwargs)
 
         def header(self):
+            # Diagonal background watermark (rotated, light, behind content)
+            if self.watermark_text:
+                self.set_font(self.font_name, 'B', 46)
+                self.set_text_color(230, 230, 230)
+                with self.rotation(45, x=105, y=148):
+                    self.text(35, 155, self.watermark_text)
+                self.set_text_color(0, 0, 0)
+
             # Watermark / Header banner
             if self.watermark_text:
                 self.set_fill_color(240, 248, 255)
