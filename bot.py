@@ -1812,8 +1812,8 @@ async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # OLD: set awaiting mode
-    context.user_data["awaiting_img"] = True
-    await update.message.reply_text("📷 এখন একটা ছবি পাঠান — তা থেকে MCQ poll বানানো হবে।")
+    await update.message.reply_text("❌ ছবিতে reply করে /img দাও!")
+    return
 
 
 async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2096,9 +2096,8 @@ async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await notify_owner(context, f"[cmd_pdf] Error for user {update.effective_user.id}:\n{e}")
             return
 
-    # OLD: set awaiting mode
-    context.user_data["awaiting_pdf"] = True
-    await update.message.reply_text("📄 এখন একটা PDF ফাইল পাঠান — তা থেকে MCQ poll বানানো হবে।")
+    await update.message.reply_text("❌ PDF ফাইলে reply করে /pdf দাও!")
+    return
 
 
 async def pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
