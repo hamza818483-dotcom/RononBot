@@ -1044,38 +1044,100 @@ async def cmd_dbstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+DETAILED_HELP_OWNER = (
+    "👑 <b>Owner Commands — বিস্তারিত</b>\n\n"
+
+    "🔑 <b>/permit (user id)</b>\n"
+    "নির্দিষ্ট ইউজারকে বট ব্যবহারের অনুমতি দেয়। ইউজার আইডি না দিলে ফরম্যাট রিমাইন্ড করবে।\n"
+    "Ex: <code>/permit 123456789</code>\n\n"
+
+    "🔒 <b>/remove (user id)</b>\n"
+    "আগে অনুমতিপ্রাপ্ত ইউজারের এক্সেস বাতিল করে। permitted list-এ না থাকলে জানিয়ে দেয়।\n"
+    "Ex: <code>/remove 123456789</code>\n\n"
+
+    "🗝️ <b>/addkey (gemini api key)</b>\n"
+    "নতুন Gemini API key যোগ করে key pool-এ। Duplicate key হলে জানিয়ে দেয়, এতে quota rotation সহজ হয়।\n"
+    "Ex: <code>/addkey AQ.xxxxxxxxxxxx</code>\n\n"
+
+    "📊 <b>/keys</b>\n"
+    "যোগ করা সব Gemini key-র quota/error status masked আকারে দেখায়।\n\n"
+
+    "📡 <b>/channel (id) (name)</b>\n"
+    "Force-subscribe বা broadcast channel যোগ করে। id এবং display name দুটোই দিতে হয়।\n"
+    "Ex: <code>/channel -1001234567890 MyChannel</code>\n\n"
+
+    "📋 <b>/channellist</b>\n"
+    "যোগ করা সব চ্যানেলের তালিকা দেখায়।\n\n"
+
+    "🗑️ <b>/removechannel (id)</b>\n"
+    "নির্দিষ্ট চ্যানেল আইডি দিয়ে তালিকা থেকে চ্যানেল মুছে দেয়।\n"
+    "Ex: <code>/removechannel -1001234567890</code>\n\n"
+
+    "🏷️ <b>/tag (name)</b>\n"
+    "MCQ প্রশ্নের জন্য tag/category সেট করে, যা পরে explanation ও sheet-এ track হয়।\n"
+    "Ex: <code>/tag Physics-Chapter1</code>\n\n"
+
+    "📄 <b>/sheet</b>\n"
+    "বর্তমান সেশনের প্রশ্নগুলো নিয়ে Google Sheet-স্টাইল ডেটা/এক্সপোর্ট জেনারেট করে।\n\n"
+
+    "💡 <b>/exp</b>\n"
+    "প্রশ্নের ব্যাখ্যা (explanation) generate/toggle করার সেটিংস। on/off বা per-question explanation control করে।\n\n"
+
+    "🖼️ <b>/img</b>\n"
+    "ছবি (screenshot/photo of question) থেকে Gemini দিয়ে MCQ বানায়। কমান্ডের পর ছবি পাঠাতে হয়। এরপর CSV backup auto তৈরি হয়।\n\n"
+
+    "📕 <b>/pdf</b>\n"
+    "PDF ফাইল থেকে MCQ বের করে। কমান্ড দেওয়ার পর PDF আপলোড করতে হয়; fpdf2 দিয়ে output তৈরি হয় (Chromium ব্যবহার হয় না, Render free-tier RAM limit-এর কারণে)।\n\n"
+
+    "🔖 <b>/wm</b>\n"
+    "জেনারেট হওয়া PDF-এ watermark টেক্সট সেট করে।\n\n"
+
+    "📶 <b>/ping</b>\n"
+    "বট লাইভ কিনা, response time কেমন — quick status check করে।\n\n"
+
+    "🗄️ <b>/dbstatus</b>\n"
+    "Database (Supabase/SQLite) connection ও health status দেখায়।\n\n"
+
+    "❓ <b>/help</b>\n"
+    "এই detailed command list যেকোনো সময় আবার দেখায়।"
+)
+
+DETAILED_HELP_USER = (
+    "📋 <b>Available Commands — বিস্তারিত</b>\n\n"
+
+    "🏷️ <b>/tag (name)</b>\n"
+    "MCQ প্রশ্নের জন্য tag/category সেট করে।\n"
+    "Ex: <code>/tag Physics-Chapter1</code>\n\n"
+
+    "💡 <b>/exp</b>\n"
+    "প্রশ্নের ব্যাখ্যা (explanation) generate/toggle করার সেটিংস।\n\n"
+
+    "🖼️ <b>/img</b>\n"
+    "ছবি থেকে Gemini দিয়ে MCQ বানায়। কমান্ডের পর ছবি পাঠাতে হয়।\n\n"
+
+    "📕 <b>/pdf</b>\n"
+    "PDF ফাইল থেকে MCQ বের করে। কমান্ড দেওয়ার পর PDF আপলোড করতে হয়।\n\n"
+
+    "🔖 <b>/wm</b>\n"
+    "জেনারেট হওয়া PDF-এ watermark টেক্সট সেট করে।\n\n"
+
+    "📶 <b>/ping</b>\n"
+    "বট লাইভ কিনা, response time কেমন — quick status check করে।\n\n"
+
+    "❓ <b>/help</b>\n"
+    "এই detailed command list যেকোনো সময় আবার দেখায়।"
+)
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     name = user.first_name or "বন্ধু"
     text = f"Welcome to Ronon Bot! প্রিয় {name}..😄\n\n"
 
     if user.id in OWNER_IDS:
-        text += (
-            "👑 <b>Owner Commands:</b>\n"
-            "/permit (user id) — ইউজারকে অনুমতি দিন\n"
-            "/remove (user id) — অনুমতি বাতিল করুন\n"
-            "/addkey (gemini api key) — Gemini API key যোগ করুন\n"
-            "/keys — সব key-এর quota status দেখুন\n"
-            "/channel (id) (name) — চ্যানেল যোগ করুন\n"
-            "/channellist — যোগ করা চ্যানেলের তালিকা\n"
-            "/removechannel (id) — চ্যানেল সরান\n"
-            "/tag (name) — প্রশ্নের ট্যাগ সেট করুন\n"
-            "/exp — Explanation settings\n"
-            "/img — ছবি থেকে MCQ বানান\n"
-            "/pdf — PDF থেকে MCQ বানান\n"
-            "/wm — Watermark সেট করুন\n"
-            "/ping — Bot status চেক করুন\n"
-        )
+        text += DETAILED_HELP_OWNER
     elif is_permitted(user.id):
-        text += (
-            "📋 <b>Available Commands:</b>\n"
-            "/tag (name) — প্রশ্নের ট্যাগ সেট করুন\n"
-            "/exp — Explanation settings\n"
-            "/img — ছবি থেকে MCQ বানান\n"
-            "/pdf — PDF থেকে MCQ বানান\n"
-            "/wm — Watermark সেট করুন\n"
-            "/ping — Bot status চেক করুন\n"
-        )
+        text += DETAILED_HELP_USER
     else:
         await update.message.reply_text(
             "আপনার বটে এক্সেস নাই❌\n"
@@ -1086,6 +1148,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await cmd_start(update, context)
 
 
 @owner_only
@@ -2401,6 +2467,7 @@ def main():
 
     # Handlers
     ptb_app.add_handler(CommandHandler("start", cmd_start))
+    ptb_app.add_handler(CommandHandler("help", cmd_help))
     ptb_app.add_handler(CommandHandler("permit", cmd_permit))
     ptb_app.add_handler(CommandHandler("remove", cmd_remove))
     ptb_app.add_handler(CommandHandler("addkey", cmd_addkey))
