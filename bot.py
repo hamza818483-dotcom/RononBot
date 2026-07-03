@@ -656,7 +656,8 @@ async def gemini_generate_mcq(image_bytes: bytes, mime_type: str = "image/jpeg",
                         contents=[
                             types.Part.from_text(text=prompt),
                             types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                        ]
+                        ],
+                        config=types.GenerateContentConfig(max_output_tokens=8192)
                     )
                 resp = await asyncio.to_thread(_call)
                 db_increment_key_usage(key)
@@ -717,7 +718,11 @@ async def _extract_existing_mcqs_merged(prompt: str, image_bytes: bytes, mime_ty
                         contents=[
                             types.Part.from_text(text=prompt),
                             types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                        ]
+                        ],
+                        # existing_only mode-এ page-এ অনেক বেশি MCQ থাকতে পারে (৩০+) এবং প্রতিটা
+                        # call internally multi-pass verify করে — output truncate হয়ে JSON parse
+                        # fail (= false miss) এড়াতে token limit স্বাভাবিকের চেয়ে বেশি রাখা হয়েছে
+                        config=types.GenerateContentConfig(max_output_tokens=16384)
                     )
                 resp = await asyncio.to_thread(_call)
                 db_increment_key_usage(key)
