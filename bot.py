@@ -579,6 +579,7 @@ MCQ_PROMPT_EXISTING_ONLY = """📝 Special MCQ TYPE: EXISTING EXTRACTION ONLY (S
 -যদি এই page-এ কোনো readymade MCQ না থাকে (শুধু প্লেইন টেক্সট/তথ্য/প্যারাগ্রাফ থাকে, কোনো "প্রশ্ন+option+উত্তর" স্ট্রাকচার নাই), তাহলে অবশ্যই empty JSON array [] রিটার্ন করবে। কোনো MCQ বানিয়ে দিবে না।
 -প্রতিটি readymade MCQ-এর জন্য অবশ্যই সঠিক উত্তর (answer) থাকতে হবে explanation/answer key অংশে বা প্রশ্নের নিচে/পাশে চিহ্নিত করা থাকতে হবে। উত্তর কোথাও খুঁজে না পেলে সেই MCQ স্কিপ করবে, নিজে অনুমান করে উত্তর বসাবে না।
 -এই page-এ থাকা প্রতিটি readymade MCQ MUST তুলে আনতে হবে — একটাও miss/skip করা যাবে না। খুব ছোট, অস্পষ্ট, বা কোণায় থাকা MCQ-ও বাদ দেওয়া যাবে না।
+-কোনো নির্দিষ্ট সংখ্যক MCQ বানানোর/নেওয়ার লিমিট নাই — page-এ যতগুলো readymade MCQ থাকে, ALL/সবগুলোই extract করতে হবে, কোনো একটাও বাদ দিয়ে অল্প কিছু দেওয়া চলবে না।
 -MCQ-এর প্রশ্ন, ৪টি option, এবং ব্যাখ্যা (যদি থাকে) হুবহু সোর্সের টেক্সট অনুযায়ী রাখবে — rewrite/paraphrase/summarize করবে না, শুধু accurately extract করবে।
 -টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা,সেকশনের নাম,"Card 1"/"Card 2" এর মতো navigation/label টেক্সট কখনো MCQ হিসেবে extract করবে না।
 
@@ -2393,13 +2394,16 @@ async def pdf_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"\n⚠️ <b>{len(skipped_pages)} টি page-এ</b> কোনো existing MCQ পাওয়া যায়নি, "
                 f"তাই skip করা হয়েছে (page: {', '.join(str(p) for p in skipped_pages)})।"
             )
+        # Existing MCQ mode-এ per-page count কখনো apply হয় না — page-এ যা readymade MCQ
+        # থাকে সবই নেওয়া হয়, তাই এখানে count না দেখিয়ে স্পষ্টভাবে সেটা জানানো হচ্ছে
+        per_page_line = "All Existing MCQ (no limit)" if existing_only else (per_page_count or "Highest Possible")
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=(
                 f"📋 <b>{file_name}</b>\n"
                 f"🎯 Topic: <b>{topic}</b>\n"
                 f"📄 Page Range: <b>{page_range or 'All'}</b>\n"
-                f"🎯 Per Page MCQ: <b>{per_page_count or 'Highest Possible'}</b>\n"
+                f"🎯 Per Page MCQ: <b>{per_page_line}</b>\n"
                 f"🧩 Mode: <b>{mode_label}</b>\n"
                 f"📝 Extracted MCQ: <b>{cached['total_mcq']}</b>{skipped_note}\n\n"
                 f"Channel select করো:{no_channel_note}"
@@ -2605,8 +2609,11 @@ async def _extract_pdf_mcqs(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 img.save(buf, format="JPEG")
                 page_bytes = buf.getvalue()
 
+                # Existing MCQ mode-এ per-page count কোনোভাবেই apply হবে না — page-এ
+                # যতগুলো readymade MCQ থাকে সবগুলোই extract করতে হবে, count দিয়ে limit করা যাবে না
+                effective_count = None if existing_only else per_page
                 mcqs, error = await gemini_generate_mcq(
-                    page_bytes, "image/jpeg", per_page, topic=topic, page=page_num,
+                    page_bytes, "image/jpeg", effective_count, topic=topic, page=page_num,
                     existing_only=existing_only
                 )
 
