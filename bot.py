@@ -4,6 +4,7 @@ Owner-managed access, Gemini-powered /img /pdf MCQ poll generator,
 per-poll tags + explanations. Webhook mode for Render.
 """
 import os
+import html
 import re
 import json
 import sqlite3
@@ -1150,9 +1151,22 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         with open(os.path.join(os.path.dirname(__file__), "RononBot_Command_Guide.md"), "r", encoding="utf-8") as f:
             guide = f.read()
+
+        def md_to_tg_html(text: str) -> str:
+            text = re.sub(r'^>\s?(.+)$', r'\1', text, flags=re.MULTILINE)
+            text = re.sub(r'^---+$', '', text, flags=re.MULTILINE)
+            text = html.escape(text)
+            text = re.sub(r'^#{1,6}\s*(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+            text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+            text = re.sub(r'(?<!\*)\*([^*\n]+?)\*(?!\*)', r'<i>\1</i>', text)
+            text = re.sub(r'`([^`\n]+?)`', r'<code>\1</code>', text)
+            text = re.sub(r'\n{3,}', '\n\n', text)
+            return text.strip()
+
+        guide_html = md_to_tg_html(guide)
         chunks = []
         cur = ""
-        for line in guide.split("\n"):
+        for line in guide_html.split("\n"):
             if len(cur) + len(line) + 1 > 3800:
                 chunks.append(cur)
                 cur = line
@@ -1162,9 +1176,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chunks.append(cur)
         for chunk in chunks:
             try:
-                await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+                await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
             except Exception:
-                await update.message.reply_text(chunk)
+                await update.message.reply_text(re.sub(r'<[^>]+>', '', chunk))
     except Exception as e:
         logger.error(f"[cmd_start] Guide read error: {e}")
         text = ""
