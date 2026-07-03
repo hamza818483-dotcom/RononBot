@@ -985,7 +985,9 @@ def require_permit(func):
         user_id = update.effective_user.id
         if not is_permitted(user_id):
             await update.message.reply_text(
-                "❌ এই বট ব্যবহারের অনুমতি আপনার নেই।\nOwner-কে যোগাযোগ করুন।"
+                "আপনার বটে এক্সেস নাই❌\n"
+                "বটের মালিক সাজিদ আলম খান প্রহর(RpMC)\n"
+                "মালিকের সাথে যোগাযোগের জন্য 👉@Prohor_2007"
             )
             return
         return await func(update, context)
