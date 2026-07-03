@@ -1885,6 +1885,21 @@ body{{font-family:'Noto Sans Bengali','Noto Sans','Noto Sans Bengali UI',sans-se
 </body></html>"""
 
 
+async def _generate_styled_pdf_bytes(mcqs: list, topic: str, watermark: str = "") -> bytes:
+    """Same Chromium HTML→PDF pipeline used by /sheet (RONON Solve Sheet style),
+    reused so /pdf and /img PDF outputs match /sheet's styling exactly.
+    Falls back to fpdf2 generate_pdf() if chromium unavailable/fails."""
+    try:
+        html_out = _build_solve_sheet_html(topic, 1, mcqs)
+        pdf_bytes = await _html_to_pdf(html_out)
+        if pdf_bytes:
+            return pdf_bytes
+        logger.warning("[PDF] chromium PDF failed, using fpdf2 fallback")
+    except Exception as e:
+        logger.error(f"[PDF] styled PDF generation error: {e} — falling back to fpdf2")
+    return generate_pdf(mcqs, topic, watermark)
+
+
 @require_permit
 async def cmd_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply = update.message.reply_to_message
@@ -2048,7 +2063,7 @@ async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "img_pdf_only":
         settings = db_get_settings(user_id)
         watermark = settings.get("watermark") or ""
-        pdf_bytes = generate_pdf(mcqs, topic, watermark)
+        pdf_bytes = await _generate_styled_pdf_bytes(mcqs, topic, watermark)
         if pdf_bytes:
             pdf_buffer = io.BytesIO(pdf_bytes)
             pdf_buffer.name = f"MCQ_{topic.replace(' ', '_')}.pdf"
@@ -2074,7 +2089,7 @@ async def img_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         settings = db_get_settings(user_id)
         watermark = settings.get("watermark") or ""
-        pdf_bytes = generate_pdf(mcqs, topic, watermark)
+        pdf_bytes = await _generate_styled_pdf_bytes(mcqs, topic, watermark)
         if pdf_bytes:
             pdf_buffer = io.BytesIO(pdf_bytes)
             pdf_buffer.name = f"MCQ_{topic.replace(' ', '_')}.pdf"
@@ -2452,7 +2467,7 @@ async def _deliver_pdf_cached(context, all_mcqs_csv, total_mcq, topic, chat_id, 
             ]
             settings = db_get_settings(user_id)
             watermark = settings.get("watermark") or ""
-            pdf_bytes = generate_pdf(mcqs_for_pdf, topic, watermark)
+            pdf_bytes = await _generate_styled_pdf_bytes(mcqs_for_pdf, topic, watermark)
             if pdf_bytes:
                 pdf_bio = io.BytesIO(pdf_bytes)
                 pdf_bio.name = f"{topic}_mcq.pdf"
