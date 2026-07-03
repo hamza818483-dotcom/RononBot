@@ -1135,13 +1135,8 @@ DETAILED_HELP_USER = (
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     name = user.first_name or "বন্ধু"
-    text = f"Welcome to Ronon Bot! প্রিয় {name}..😄\n\n"
 
-    if user.id in OWNER_IDS:
-        text += DETAILED_HELP_OWNER
-    elif is_permitted(user.id):
-        text += DETAILED_HELP_USER
-    else:
+    if user.id not in OWNER_IDS and not is_permitted(user.id):
         await update.message.reply_text(
             "আপনার বটে এক্সেস নাই❌\n"
             "বটের মালিক সাজিদ আলম খান প্রহর(RpMC)\n"
@@ -1150,7 +1145,22 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    await update.message.reply_text(f"Welcome to Ronon Bot! প্রিয় {name}..😄", parse_mode=ParseMode.HTML)
+
+    try:
+        with open(os.path.join(os.path.dirname(__file__), "RononBot_Command_Guide.md"), "r", encoding="utf-8") as f:
+            guide = f.read()
+        for i in range(0, len(guide), 3800):
+            chunk = guide[i:i+3800]
+            await update.message.reply_text(chunk)
+    except Exception as e:
+        logger.error(f"[cmd_start] Guide read error: {e}")
+        text = ""
+        if user.id in OWNER_IDS:
+            text = DETAILED_HELP_OWNER
+        elif is_permitted(user.id):
+            text = DETAILED_HELP_USER
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
