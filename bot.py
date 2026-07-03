@@ -1195,14 +1195,40 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def cmd_permit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Format: /permit (user id)")
+    target_id = None
+
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        target_id = update.message.reply_to_message.from_user.id
+
+    elif context.args:
+        arg = context.args[0].strip()
+        if arg.lstrip("-").isdigit():
+            target_id = int(arg)
+        elif "t.me/+" in arg or "joinchat" in arg:
+            await update.message.reply_text(
+                "❌ Invite link (t.me/+...) থেকে user id বের করা সম্ভব না (Telegram API সাপোর্ট করে না)।\n"
+                "সঠিক user id, @username, অথবা user-এর message reply করে /permit দিন।"
+            )
+            return
+        else:
+            m = re.search(r"(?:t\.me/)?@?([A-Za-z0-9_]{5,32})$", arg)
+            username = m.group(1) if m else arg.lstrip("@")
+            try:
+                chat = await context.bot.get_chat(f"@{username}")
+                target_id = chat.id
+            except Exception:
+                await update.message.reply_text(
+                    "❌ এই username থেকে user resolve করা গেল না (user বটে message পাঠায়নি)।\n"
+                    "বিকল্প: user-এর কোনো message reply করে /permit দিন, অথবা তার numeric user id দিন।"
+                )
+                return
+
+    if target_id is None:
+        await update.message.reply_text(
+            "Format:\n/permit (user id)\n/permit @username\nবা user-এর message reply করে শুধু /permit লিখুন।"
+        )
         return
-    try:
-        target_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("❌ সঠিক user id দিন (সংখ্যা)।")
-        return
+
     db_permit_user(target_id)
     await update.message.reply_text(f"✅ User <code>{target_id}</code> কে অনুমতি দেওয়া হয়েছে।", parse_mode=ParseMode.HTML)
 
