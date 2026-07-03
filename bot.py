@@ -1315,11 +1315,30 @@ async def cmd_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def cmd_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 2:
-        await update.message.reply_text("Format: /channel (channel id) (channel name)")
+    if not context.args:
+        await update.message.reply_text("Format: /channel (channel id) (channel name)\nবা: /channel @channelusername")
         return
-    channel_id = context.args[0].strip()
-    channel_name = " ".join(context.args[1:]).strip()
+
+    if len(context.args) == 1:
+        arg = context.args[0].strip()
+        if arg.lstrip("-").isdigit():
+            await update.message.reply_text("Format: /channel (channel id) (channel name)")
+            return
+        username = arg.lstrip("@")
+        try:
+            chat = await context.bot.get_chat(f"@{username}")
+            channel_id = str(chat.id)
+            channel_name = chat.title or username
+        except Exception:
+            await update.message.reply_text(
+                "❌ এই username থেকে channel resolve করা গেল না। বট চ্যানেলে admin হিসেবে যোগ আছে কিনা চেক করো, "
+                "অথবা সঠিক channel id + name দিয়ে দাও: /channel (id) (name)"
+            )
+            return
+    else:
+        channel_id = context.args[0].strip()
+        channel_name = " ".join(context.args[1:]).strip()
+
     added = db_add_channel(channel_id, channel_name, update.effective_user.id)
     warn = "" if sb else "\n\n⚠️ <b>SUPABASE_URL/SUPABASE_KEY সেট নেই — এই ডেটা restart এ মুছে যাবে!</b> Render env vars এ যোগ করো।"
     if added:
