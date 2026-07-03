@@ -6,7 +6,6 @@ name: Keep RononBot Alive — Layer 1 (every 5min)
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # :00, :05, :10, :15...
   workflow_dispatch:
 
 jobs:
@@ -39,6 +38,6 @@ jobs:
           for oid in "${IDS[@]}"; do
             curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
               -d chat_id="${oid}" \
-              -d text="⚠️ RononBot health check failed (status: $STATUS) — Layer 1" \
+              -d text="⚠️ RononBot health check failed (status: ${{ steps.check.outputs.status }}) — Layer 1" \
               || true
           done
