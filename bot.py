@@ -1150,9 +1150,21 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         with open(os.path.join(os.path.dirname(__file__), "RononBot_Command_Guide.md"), "r", encoding="utf-8") as f:
             guide = f.read()
-        for i in range(0, len(guide), 3800):
-            chunk = guide[i:i+3800]
-            await update.message.reply_text(chunk)
+        chunks = []
+        cur = ""
+        for line in guide.split("\n"):
+            if len(cur) + len(line) + 1 > 3800:
+                chunks.append(cur)
+                cur = line
+            else:
+                cur += ("\n" if cur else "") + line
+        if cur:
+            chunks.append(cur)
+        for chunk in chunks:
+            try:
+                await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+            except Exception:
+                await update.message.reply_text(chunk)
     except Exception as e:
         logger.error(f"[cmd_start] Guide read error: {e}")
         text = ""
