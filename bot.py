@@ -1043,7 +1043,8 @@ def require_permit(func):
 
 def owner_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id not in OWNER_IDS:
+        user_id = update.effective_user.id
+        if user_id not in OWNER_IDS and not is_permitted(user_id):
             await update.message.reply_text("❌ এই command শুধু Owner ব্যবহার করতে পারবে।")
             return
         return await func(update, context)
@@ -1450,7 +1451,7 @@ async def cmd_removechannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if query.from_user.id not in OWNER_IDS:
+    if query.from_user.id not in OWNER_IDS and not is_permitted(query.from_user.id):
         await query.answer("❌ শুধু Owner ব্যবহার করতে পারবে।", show_alert=True)
         return
     await query.answer()
