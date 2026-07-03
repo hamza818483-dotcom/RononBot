@@ -1052,13 +1052,11 @@ def owner_only(func):
 
 
 async def notify_owner(context: ContextTypes.DEFAULT_TYPE, text: str):
-    """QuizBot-এর notify_owner-এর মতো — non-fatal কিন্তু গুরুত্বপূর্ণ error (যেমন /pdf-এর
-    কোনো নির্দিষ্ট পেইজ fail করা) owner-দের চুপচাপ log-এ রাখার বদলে সরাসরি জানিয়ে দেয়।"""
-    for oid in OWNER_IDS:
-        try:
-            await context.bot.send_message(chat_id=oid, text=text[:4096], parse_mode=ParseMode.HTML)
-        except Exception:
-            pass
+    """Error শুধুমাত্র ERROR_NOTIFY_USER-কে পাঠানো হয়, অন্য কোনো owner/user-কে না।"""
+    try:
+        await context.bot.send_message(chat_id=ERROR_NOTIFY_USER, text=text[:4096], parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -1581,8 +1579,9 @@ async def exp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     except Exception as e:
         logger.error(f"exp_callback error: {e}", exc_info=True)
+        await notify_owner(context, f"[exp_callback] Error:\n{e}")
         try:
-            await query.message.reply_text(f"❌ Error: {e}")
+            await query.message.reply_text("❌ কিছু একটা সমস্যা হয়েছে, আবার চেষ্টা করুন।")
         except Exception:
             pass
 
@@ -1626,7 +1625,8 @@ async def _generate_sheet_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         ticker.cancel()
         logger.error(f"[SHEET] generate error: {e}", exc_info=True)
-        await wait_msg.edit_text(f"❌ Error: {e}")
+        await notify_owner(context, f"[SHEET generate] Error:\n{e}")
+        await wait_msg.edit_text("❌ কিছু একটা সমস্যা হয়েছে, আবার চেষ্টা করুন।")
 
 
 async def handle_plain_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1869,7 +1869,8 @@ async def cmd_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logger.error(f"cmd_sheet error: {e}", exc_info=True)
-        await wait_msg.edit_text(f"❌ Error: {e}")
+        await notify_owner(context, f"[cmd_sheet] Error:\n{e}")
+        await wait_msg.edit_text("❌ কিছু একটা সমস্যা হয়েছে, আবার চেষ্টা করুন।")
 
 
 # ============================================================
@@ -1926,7 +1927,8 @@ async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.error(f"cmd_img reply error: {e}", exc_info=True)
-            await wait_msg.edit_text(f"❌ Error: {e}")
+            await notify_owner(context, f"[cmd_img] Error:\n{e}")
+            await wait_msg.edit_text("❌ কিছু একটা সমস্যা হয়েছে, আবার চেষ্টা করুন।")
         return
 
     # OLD: set awaiting mode
@@ -2074,7 +2076,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ {sent}টি MCQ poll পাঠানো হয়েছে!")
     except Exception as e:
         logger.error(f"handle_photo error: {e}", exc_info=True)
-        await wait_msg.edit_text(f"❌ Error: {e}")
+        await notify_owner(context, f"[handle_photo] Error:\n{e}")
+        await wait_msg.edit_text("❌ কিছু একটা সমস্যা হয়েছে, আবার চেষ্টা করুন।")
 
 
 # ============================================================
@@ -2498,7 +2501,8 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
             db_update_session_progress(session_id, 0, status="failed")
         except Exception:
             pass  # session_id হয়তো এখনো তৈরি হয়নি (খুব প্রথম দিকেই error হলে)
-        await status_message.edit_text(f"❌ Error: {e}")
+        await notify_owner(context, f"[process_pdf] Error:\n{e}")
+        await status_message.edit_text("❌ কিছু একটা সমস্যা হয়েছে, আবার চেষ্টা করুন।")
 
 
 # ============================================================
@@ -2544,7 +2548,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ সর্বমোট {total_sent}টি MCQ poll পাঠানো হয়েছে!")
     except Exception as e:
         logger.error(f"handle_document error: {e}", exc_info=True)
-        await wait_msg.edit_text(f"❌ Error: {e}")
+        await notify_owner(context, f"[handle_document] Error:\n{e}")
+        await wait_msg.edit_text("❌ কিছু একটা সমস্যা হয়েছে, আবার চেষ্টা করুন।")
 
 
 # ============================================================
