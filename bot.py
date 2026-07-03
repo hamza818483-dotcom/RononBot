@@ -2434,7 +2434,6 @@ async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             old_cache = context.user_data.get("pdf_extracted")
             if not old_cache or old_cache.get("doc_id") != doc.file_unique_id:
                 context.user_data.pop("pdf_extracted", None)
-
             # নতুন: extraction শুরুর আগে New MCQ / Existing MCQ মোড বেছে নিতে হবে।
             # New MCQ = আগের মতোই AI নিজে থেকে MCQ বানাবে (source-এর সব তথ্য থেকে)।
             # Existing MCQ = page-এ আগে থেকে readymade বানানো MCQ থাকলে শুধু সেগুলোই
@@ -2662,8 +2661,10 @@ async def _extract_pdf_mcqs(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     pdf_file_name = doc.file_name or "document.pdf"
 
     cached = context.user_data.get("pdf_extracted")
-    if cached and cached.get("doc_id") == doc.file_unique_id:
-        return True  # already extracted for this exact file — nothing to do
+    cached_mode = cached.get("mode") if cached else None
+    wanted_mode = "existing" if existing_only else "new"
+    if cached and cached.get("doc_id") == doc.file_unique_id and cached_mode == wanted_mode:
+        return True  # already extracted for this exact file AND same mode — nothing to do
 
     await status_message.edit_text("⏳ PDF download হচ্ছে...")
 
@@ -2797,6 +2798,7 @@ async def _extract_pdf_mcqs(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
         context.user_data["pdf_extracted"] = {
             "doc_id": doc.file_unique_id,
+            "mode": "existing" if existing_only else "new",
             "all_mcqs_csv": all_mcqs_csv,
             "total_mcq": total_mcq,
             "skipped_pages": skipped_pages,
@@ -2856,8 +2858,10 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
     if not status_message:
         status_message = await update.message.reply_text("⏳ প্রসেস হচ্ছে...")
 
+    existing_only = context.user_data.get("pdf_existing_only", False)
+    wanted_mode = "existing" if existing_only else "new"
     cached = context.user_data.get("pdf_extracted")
-    if not cached or cached.get("doc_id") != doc.file_unique_id:
+    if not cached or cached.get("doc_id") != doc.file_unique_id or cached.get("mode") != wanted_mode:
         # Safety net — should not normally happen since cmd_pdf extracts before showing
         # buttons. Falls back to extracting now instead of failing silently.
         ok = await _extract_pdf_mcqs(update, context, status_message)
