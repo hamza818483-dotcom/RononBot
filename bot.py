@@ -644,8 +644,8 @@ option না। "একটা MCQ-এর answer format অন্যগুলো
 
 🟪🟪🟪 INTERNAL SELF-VERIFICATION PROCESS (MUST FOLLOW) 🟪🟪🟪
 -Pass 1: পুরো page টা top থেকে bottom, left থেকে right স্ক্যান করে সব readymade MCQ-এর একটা draft লিস্ট বানাও।
--Pass 2: আবার পুরো page টা নতুন করে স্ক্যান করো, checking mindset নিয়ে — Pass 1-এ কোনো MCQ বাদ পড়েছে কিনা।
--Pass 3: Draft লিস্টের প্রতিটা MCQ-এর জন্য verify করো সঠিক উত্তর সত্যিই সোর্স থেকে নেওয়া হয়েছে কিনা, প্রশ্ন+৪টা option হুবহু মেলে কিনা, শাফল ঠিকমতো হয়েছে কিনা।
+-Pass 2: আবার পুরো page টা নতুন করে স্ক্যান করো, checking mindset নিয়ে — Pass 1-এ কোনো MCQ বাদ পড়েছে কিনা। বিশেষভাবে page-এর একদম নিচের অংশ/শেষ MCQ, এবং column-এর একদম শেষ প্রশ্নটা আলাদাভাবে আবার চেক করো — শেষের MCQ সবচেয়ে বেশি miss হয়।
+-Pass 3: Draft লিস্টের প্রতিটা MCQ-এর জন্য verify করো সঠিক উত্তর সত্যিই সোর্স থেকে নেওয়া হয়েছে কিনা, প্রশ্ন+৪টা option হুবহু মেলে কিনা, শাফল ঠিকমতো হয়েছে কিনা, এবং draft লিস্টের item সংখ্যা page-এ দৃশ্যমান MCQ সংখ্যার সাথে মিলছে কিনা (গণনা করে নিশ্চিত হও)।
 -শুধুমাত্র এই ৩টা internal pass শেষ হওয়ার পরেই final JSON output দিবে।
 
 Topic: {topic}
