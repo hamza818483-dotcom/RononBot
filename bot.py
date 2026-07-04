@@ -2617,6 +2617,17 @@ async def pdf_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return  # status_message already shows the specific error
 
     if channel_id:
+        cached = context.user_data.get("pdf_extracted") or {}
+        page_groups = cached.get("page_groups") or []
+        page_breakdown = "\n".join(
+            f"📌 Page {g['page']}: {len(g['mcqs'])} MCQ" for g in page_groups
+        )
+        if page_breakdown:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"📝 Extracted MCQ: <b>{cached.get('total_mcq', 0)}</b>\n\n{page_breakdown}",
+                parse_mode=ParseMode.HTML
+            )
         await process_pdf(update, context, channel_id, status_message=status_message)
     else:
         channels = db_list_channels()
@@ -2638,6 +2649,16 @@ async def pdf_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Existing MCQ mode-এ per-page count কখনো apply হয় না — page-এ যা readymade MCQ
         # থাকে সবই নেওয়া হয়, তাই এখানে count না দেখিয়ে স্পষ্টভাবে সেটা জানানো হচ্ছে
         per_page_line = "All Existing MCQ (no limit)" if existing_only else (per_page_count or "Highest Possible")
+
+        # Per-page MCQ breakdown — এই message কখনো edit/delete হবে না, নতুন standalone
+        # message হিসেবে পাঠানো হচ্ছে (QuizBot-এর /qbm-এর মতো), তাই New MCQ বা Existing MCQ
+        # যেভাবেই বানানো হোক না কেন, কোন page-এ কতগুলো MCQ হয়েছে সেটা persistent থাকবে।
+        page_groups = cached.get("page_groups") or []
+        page_breakdown = "\n".join(
+            f"📌 Page {g['page']}: {len(g['mcqs'])} MCQ" for g in page_groups
+        )
+        breakdown_block = f"\n\n{page_breakdown}" if page_breakdown else ""
+
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=(
@@ -2646,7 +2667,8 @@ async def pdf_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📄 Page Range: <b>{page_range or 'All'}</b>\n"
                 f"🎯 Per Page MCQ: <b>{per_page_line}</b>\n"
                 f"🧩 Mode: <b>{mode_label}</b>\n"
-                f"📝 Extracted MCQ: <b>{cached['total_mcq']}</b>{skipped_note}\n\n"
+                f"📝 Extracted MCQ: <b>{cached['total_mcq']}</b>{skipped_note}"
+                f"{breakdown_block}\n\n"
                 f"Channel select করো:{no_channel_note}"
             ),
             parse_mode=ParseMode.HTML,
