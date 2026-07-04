@@ -2165,23 +2165,14 @@ async def cmd_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @require_permit
 async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reply = update.message.reply_to_message
-    has_photo = bool(reply and reply.photo)
-    has_img_doc = bool(reply and reply.document and (reply.document.mime_type or "").startswith("image/"))
-
     # NEW: reply-based immediate processing
-    if reply and (has_photo or has_img_doc):
+    if update.message.reply_to_message and update.message.reply_to_message.photo:
         topic = " ".join(context.args).strip() if context.args else DEFAULT_TOPIC
+        photo = update.message.reply_to_message.photo[-1]
 
         wait_msg = await update.message.reply_text("⏳ ছবি ডাউনলোড হচ্ছে...\n[░░░░░░░░░░] 0%")
         try:
-            # ছবি "document/file" (📎) হিসেবে পাঠানো হলে Telegram compress করে না — MCQ-এর
-            # ছোট টেক্সট/মার্ক স্পষ্ট থাকে, Existing MCQ mode-এর ভিজ্যুয়াল detection অনেক বেশি
-            # নির্ভরযোগ্য হয়। "photo" হিসেবে পাঠালে Telegram নিজে থেকেই কমপ্রেস করে ফেলে,
-            # যেটা /pdf-এর নিজের-রেন্ডার-করা page-এর তুলনায় কম sharp — তাই document থাকলে
-            # সবসময় সেটাকেই প্রেফার করা হচ্ছে।
-            file_id = reply.document.file_id if has_img_doc else reply.photo[-1].file_id
-            file = await context.bot.get_file(file_id)
+            file = await context.bot.get_file(photo.file_id)
             img_bytes = bytes(await file.download_as_bytearray())
 
             context.user_data["img_bytes"] = img_bytes
@@ -2197,17 +2188,11 @@ async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🆕 New MCQ", callback_data="imgmcqmode_new")],
                 [InlineKeyboardButton("📋 Existing MCQ", callback_data="imgmcqmode_existing")],
             ]
-            tip_line = (
-                "\n\n💡 <b>টিপ:</b> Existing MCQ mode-এর জন্য ছবি 📎 (file/document) হিসেবে "
-                "পাঠালে সবচেয়ে ভালো ফলাফল পাবে — normal photo হিসেবে পাঠালে Telegram নিজে "
-                "থেকে ছবি compress করে ফেলে, তাতে ছোট টেক্সট/মার্ক অস্পষ্ট হয়ে যেতে পারে।"
-            ) if not has_img_doc else ""
             await update.message.reply_text(
                 f"🎯 Topic: <b>{topic}</b>\n\n"
                 "MCQ মোড বেছে নাও:\n"
                 "🆕 <b>New MCQ</b> — ছবির তথ্য থেকে AI নিজে নতুন MCQ বানাবে (আগের মতো)\n"
-                "📋 <b>Existing MCQ</b> — ছবিতে আগে থেকে থাকা readymade MCQ শুধু তুলে আনবে, নতুন বানাবে না"
-                f"{tip_line}",
+                "📋 <b>Existing MCQ</b> — ছবিতে আগে থেকে থাকা readymade MCQ শুধু তুলে আনবে, নতুন বানাবে না",
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup(kb)
             )
