@@ -2667,8 +2667,26 @@ async def pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("pdfch_"):
         channel_id = data[len("pdfch_"):]
+        context.user_data["pdf_pending_channel"] = channel_id
+        kb = [
+            [InlineKeyboardButton("🖼️ With Image", callback_data="pdfimg_with")],
+            [InlineKeyboardButton("📝 Without Image", callback_data="pdfimg_without")],
+        ]
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="কোন mode-এ পাঠাবে?",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+        return
+
+    if data.startswith("pdfimg_"):
+        with_image = (data == "pdfimg_with")
+        channel_id = context.user_data.get("pdf_pending_channel")
+        if not channel_id:
+            await query.edit_message_text("❌ Session expire হয়ে গেছে, আবার channel select করো।")
+            return
         status_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text="⏳ শুরু হচ্ছে...")
-        await process_pdf(update, context, channel_id, status_message=status_msg)
+        await process_pdf(update, context, channel_id, status_message=status_msg, with_image=with_image)
         return
 
     if data == "pdf_csv_only":
@@ -2688,7 +2706,8 @@ async def pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _deliver_pdf_cached(context, all_mcqs_csv, total_mcq, topic, chat_id, channel_id,
-                               thread_id, user_id, uname, csv_only, pdf_only, both_only, status_message):
+                               thread_id, user_id, uname, csv_only, pdf_only, both_only, status_message,
+                               with_image: bool = False, page_groups: list = None):
     """Deliver already-extracted MCQ rows instantly, without re-running Gemini extraction."""
     if csv_only or pdf_only or both_only:
         if csv_only or both_only:
@@ -2723,7 +2742,70 @@ async def _deliver_pdf_cached(context, all_mcqs_csv, total_mcq, topic, chat_id, 
         await status_message.edit_text(f"✅ <b>Done!</b>\n📝 Total MCQ: {total_mcq}", parse_mode=ParseMode.HTML)
         return
 
-    # Channel mode — page image ছাড়া cached mcq থেকে সরাসরি poll পাঠানো
+    # Channel mode
+    if with_image and page_groups:
+        # With Image — per page: post the page photo, then reply MCQ polls to it
+        # (QuizBot-এর with-image system-এর মতো)
+        total_polls = 0
+        first_poll_link = ""
+        for grp in page_groups:
+            page_num = grp["page"]
+            img_bytes = grp["img_bytes"]
+            page_mcqs = grp["mcqs"]
+
+            image_msg_id = None
+            try:
+                photo_bio = io.BytesIO(img_bytes)
+                photo_bio.name = f"page_{page_num}.jpg"
+                caption = f"🟥Ronon Special MCQ System\n🎯Topic: {topic}\n🌟Page No: {page_num}"
+                photo_msg = await context.bot.send_photo(
+                    chat_id=channel_id, photo=photo_bio, caption=caption,
+                    message_thread_id=thread_id
+                )
+                image_msg_id = photo_msg.message_id
+            except Exception as e:
+                logger.warning(f"[PDF with-image] Photo send failed page {page_num}: {e}")
+
+            for i, mcq in enumerate(page_mcqs):
+                q_text = build_question_text(user_id, mcq[0])
+                opts = mcq[1:5]
+                explanation = build_final_explanation(user_id, mcq[6])
+                ans_idx = int(mcq[5]) - 1
+                poll_msg = None
+                for _attempt in range(3):
+                    try:
+                        poll_msg = await context.bot.send_poll(
+                            chat_id=channel_id, question=q_text, options=opts, type="quiz",
+                            correct_option_id=ans_idx, explanation=(explanation or None),
+                            is_anonymous=True, message_thread_id=thread_id,
+                            reply_to_message_id=image_msg_id,
+                        )
+                        break
+                    except Exception as e:
+                        logger.warning(f"[PDF with-image] Poll attempt {_attempt+1} failed (page {page_num}): {e}")
+                        await asyncio.sleep(2)
+                if poll_msg:
+                    total_polls += 1
+                    if not first_poll_link:
+                        cid_str = str(channel_id)
+                        if cid_str.startswith("-100"):
+                            first_poll_link = f"https://t.me/c/{cid_str[4:]}/{poll_msg.message_id}"
+                        else:
+                            first_poll_link = f"https://t.me/{cid_str.lstrip('@')}/{poll_msg.message_id}"
+                await asyncio.sleep(0.4)
+
+        summary = (
+            f"🟥Ronon Special Practice System\n🎯Topic: {topic}\n🚀Total MCQ: {total_mcq}\n\n"
+            f"🔗First Poll: {first_poll_link}\n\n💥শুভকামনা প্রিয় শিক্ষার্থী {uname}...\n"
+        )
+        summary_kwargs = {"chat_id": channel_id, "text": summary, "disable_web_page_preview": True}
+        if thread_id:
+            summary_kwargs["message_thread_id"] = thread_id
+        await context.bot.send_message(**summary_kwargs)
+        await status_message.edit_text(f"✅ <b>Done!</b>\n📝 Total MCQ sent: {total_polls}", parse_mode=ParseMode.HTML)
+        return
+
+    # Without Image — page image ছাড়া cached mcq থেকে সরাসরি poll পাঠানো (আগের/default system)
     total_polls = 0
     first_poll_link = ""
     for i, mcq in enumerate(all_mcqs_csv):
@@ -2838,6 +2920,7 @@ async def _extract_pdf_mcqs(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         )
 
         all_mcqs_csv = []
+        page_groups = []  # NEW: [{"page": n, "img_bytes": jpeg_bytes, "mcqs": [row,...]}] — needed for With-Image delivery
         skipped_pages = []  # existing_only mode-এ যেসব page-এ কোনো readymade MCQ পাওয়া যায়নি
 
         for idx, (page_num, img) in enumerate(pages):
@@ -2880,6 +2963,7 @@ async def _extract_pdf_mcqs(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                         return False
                     continue
 
+                page_rows = []
                 for m in mcqs:
                     opts = m.get("options", ["", "", "", ""])
                     # AI মাঝেমধ্যে option-এর শুরুতে "A) ", "ক. " ইত্যাদি prefix জুড়ে দেয় —
@@ -2887,8 +2971,13 @@ async def _extract_pdf_mcqs(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     opts = [re.sub(r'^[A-Da-dক-ঘ][)\.।]\s*', '', str(o)) for o in opts]
                     ans_idx = m.get("answer_index", 0)
                     ans_num = str(ans_idx + 1)
-                    all_mcqs_csv.append([m.get("question", ""), opts[0], opts[1], opts[2], opts[3],
-                                          ans_num, m.get("explanation", ""), "1", "1"])
+                    row = [m.get("question", ""), opts[0], opts[1], opts[2], opts[3],
+                                          ans_num, m.get("explanation", ""), "1", "1"]
+                    all_mcqs_csv.append(row)
+                    page_rows.append(row)
+
+                if page_rows:
+                    page_groups.append({"page": page_num, "img_bytes": page_bytes, "mcqs": page_rows})
 
                 total_mcq += len(mcqs)
                 page_status[idx]["done"] = True
@@ -2925,6 +3014,7 @@ async def _extract_pdf_mcqs(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             "all_mcqs_csv": all_mcqs_csv,
             "total_mcq": total_mcq,
             "skipped_pages": skipped_pages,
+            "page_groups": page_groups,
         }
         context.user_data["pdf_mcqs"] = [
             {"question": r[0], "options": [r[1], r[2], r[3], r[4]],
@@ -2956,7 +3046,7 @@ async def _extract_pdf_mcqs(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return False
 
 
-async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_id, csv_only: bool = False, status_message=None, pdf_only: bool = False, both_only: bool = False):
+async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_id, csv_only: bool = False, status_message=None, pdf_only: bool = False, both_only: bool = False, with_image: bool = False):
     """
     Delivery step only. Extraction now always happens beforehand in cmd_pdf via
     _extract_pdf_mcqs(), so by the time any button (Channel/CSV/PDF/Both) is pressed,
@@ -2996,7 +3086,8 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, channe
     try:
         await _deliver_pdf_cached(
             context, cached["all_mcqs_csv"], cached["total_mcq"], topic, chat_id, channel_id,
-            thread_id, user_id, uname, csv_only, pdf_only, both_only, status_message
+            thread_id, user_id, uname, csv_only, pdf_only, both_only, status_message,
+            with_image=with_image, page_groups=cached.get("page_groups")
         )
     except Exception as e:
         logger.error(f"[PDF cached-deliver] error: {e}", exc_info=True)
@@ -3135,7 +3226,7 @@ def main():
     ptb_app.add_handler(CallbackQueryHandler(img_mcqmode_callback, pattern="^imgmcqmode_"))
     ptb_app.add_handler(CallbackQueryHandler(img_callback, pattern="^(img_|imgmode_|imgch_)"))
     ptb_app.add_handler(CallbackQueryHandler(pdf_mode_callback, pattern="^pdfmode_"))
-    ptb_app.add_handler(CallbackQueryHandler(pdf_callback, pattern="^pdfch_|^pdf_"))
+    ptb_app.add_handler(CallbackQueryHandler(pdf_callback, pattern="^pdfch_|^pdfimg_|^pdf_"))
     ptb_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     ptb_app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
     ptb_app.add_handler(MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, handle_reply_text))
