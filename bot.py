@@ -2805,35 +2805,68 @@ async def _deliver_pdf_cached(context, all_mcqs_csv, total_mcq, topic, chat_id, 
         await status_message.edit_text(f"✅ <b>Done!</b>\n📝 Total MCQ sent: {total_polls}", parse_mode=ParseMode.HTML)
         return
 
-    # Without Image — page image ছাড়া cached mcq থেকে সরাসরি poll পাঠানো (আগের/default system)
+    # Without Image — প্রতি page-এর জন্য একটা text pre-message (Ronon branding + page no +
+    # mcq count), তারপর সেই message-কে reply করে poll-গুলো, তারপর per-page end message —
+    # QuizBot-এর with-image system-এর মতোই কাঠামো, শুধু ছবির জায়গায় টেক্সট pre-message।
     total_polls = 0
     first_poll_link = ""
-    for i, mcq in enumerate(all_mcqs_csv):
-        q_text = build_question_text(user_id, mcq[0])
-        opts = mcq[1:5]
-        explanation = build_final_explanation(user_id, mcq[6])
-        ans_idx = int(mcq[5]) - 1
-        poll_msg = None
-        for _attempt in range(3):
-            try:
-                poll_msg = await context.bot.send_poll(
-                    chat_id=channel_id, question=q_text, options=opts, type="quiz",
-                    correct_option_id=ans_idx, explanation=(explanation or None),
-                    is_anonymous=True, message_thread_id=thread_id,
-                )
-                break
-            except Exception as e:
-                logger.warning(f"[PDF cached] Poll attempt {_attempt+1} failed: {e}")
-                await asyncio.sleep(2)
-        if poll_msg:
-            total_polls += 1
-            if i == 0:
-                cid_str = str(channel_id)
-                if cid_str.startswith("-100"):
-                    first_poll_link = f"https://t.me/c/{cid_str[4:]}/{poll_msg.message_id}"
-                else:
-                    first_poll_link = f"https://t.me/{cid_str.lstrip('@')}/{poll_msg.message_id}"
-        await asyncio.sleep(0.4)
+    groups_to_use = page_groups if page_groups else [{"page": None, "mcqs": all_mcqs_csv}]
+
+    for grp in groups_to_use:
+        page_num = grp["page"]
+        page_mcqs = grp["mcqs"]
+        if not page_mcqs:
+            continue
+
+        page_line = f"\n🌟Page No: {page_num}" if page_num is not None else ""
+        pre_text = f"🟥Ronon Special MCQ System\n🎯Topic: {topic}{page_line}\n💎MCQ: {len(page_mcqs)}"
+        pre_kwargs = {"chat_id": channel_id, "text": pre_text}
+        if thread_id:
+            pre_kwargs["message_thread_id"] = thread_id
+        pre_msg = await context.bot.send_message(**pre_kwargs)
+        pre_msg_id = pre_msg.message_id
+
+        page_poll_link = ""
+        page_polls = 0
+        for i, mcq in enumerate(page_mcqs):
+            q_text = build_question_text(user_id, mcq[0])
+            opts = mcq[1:5]
+            explanation = build_final_explanation(user_id, mcq[6])
+            ans_idx = int(mcq[5]) - 1
+            poll_msg = None
+            for _attempt in range(3):
+                try:
+                    poll_msg = await context.bot.send_poll(
+                        chat_id=channel_id, question=q_text, options=opts, type="quiz",
+                        correct_option_id=ans_idx, explanation=(explanation or None),
+                        is_anonymous=True, message_thread_id=thread_id,
+                        reply_to_message_id=pre_msg_id,
+                    )
+                    break
+                except Exception as e:
+                    logger.warning(f"[PDF without-image] Poll attempt {_attempt+1} failed: {e}")
+                    await asyncio.sleep(2)
+            if poll_msg:
+                total_polls += 1
+                page_polls += 1
+                if not page_poll_link:
+                    cid_str = str(channel_id)
+                    if cid_str.startswith("-100"):
+                        page_poll_link = f"https://t.me/c/{cid_str[4:]}/{poll_msg.message_id}"
+                    else:
+                        page_poll_link = f"https://t.me/{cid_str.lstrip('@')}/{poll_msg.message_id}"
+                    if not first_poll_link:
+                        first_poll_link = page_poll_link
+            await asyncio.sleep(0.4)
+
+        end_page_line = f"🌟Page No: {page_num}\n" if page_num is not None else ""
+        end_text = f"{end_page_line}🚀MCQ: {page_polls}"
+        if page_poll_link:
+            end_text += f"\n🔗Poll Link: {page_poll_link}"
+        end_kwargs = {"chat_id": channel_id, "text": end_text, "reply_to_message_id": pre_msg_id}
+        if thread_id:
+            end_kwargs["message_thread_id"] = thread_id
+        await context.bot.send_message(**end_kwargs)
 
     summary = (
         f"🟥Ronon Special Practice System\n🎯Topic: {topic}\n🚀Total MCQ: {total_mcq}\n\n"
