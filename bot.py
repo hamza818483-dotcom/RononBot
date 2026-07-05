@@ -1216,16 +1216,18 @@ async def send_mcqs_as_polls(context: ContextTypes.DEFAULT_TYPE, user_id: int, m
     uddipok_msg_id = None
 
     for i, mcq in enumerate(mcqs):
-        q_text = build_question_text(user_id, mcq.get("question", ""))
+        raw_question = mcq.get("question", "")
         explanation = build_final_explanation(user_id, mcq.get("explanation", ""))
         opts = mcq.get("options", [])
         if len(opts) < 4:
             logger.warning("Poll send skipped: fewer than 4 options")
             continue
 
-        # উদ্দীপক গ্রুপিং: নতুন উদ্দীপক পেলে সেটা আগে টেক্সট মেসেজ হিসেবে পাঠাবে,
-        # এবং সেই গ্রুপের সব poll সেই মেসেজকে reply করবে।
         uddipok_text = mcq.get("uddipok", "")
+        if uddipok_text and raw_question.strip().startswith(uddipok_text.strip()):
+            raw_question = raw_question.strip()[len(uddipok_text.strip()):].lstrip()
+        q_text = build_question_text(user_id, raw_question)
+
         poll_reply_target = reply_to_message_id
         if uddipok_text:
             if uddipok_text != last_uddipok_text:
