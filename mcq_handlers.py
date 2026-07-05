@@ -38,8 +38,8 @@ from bot import (
     db_get_settings,
     db_list_channels,
     _animate_generation_progress,
-    _generate_styled_pdf_bytes,
 )
+from sheet_handlers import _generate_styled_pdf_bytes
 
 
 @require_permit
