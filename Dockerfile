@@ -18,9 +18,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY bot.py .
 COPY mcq_handlers.py .
 COPY sheet_handlers.py .
+COPY main.py .
 COPY RononBot_Command_Guide.md .
 
 # Persistent storage now via Supabase (SUPABASE_URL/SUPABASE_KEY env vars) — sqlite is only an emergency fallback
 ENV DB_PATH=/app/ronon.db
 
-CMD ["python", "bot.py"]
+CMD ["python", "main.py"]

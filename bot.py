@@ -2118,7 +2118,7 @@ def main():
     web.run_app(web_app, host='0.0.0.0', port=port)
 
 
-if __name__ == "__main__":
+def _run_with_restart():
     import time as _time
     _restart_count = 0
     while True:
